@@ -13,7 +13,7 @@
 //   - default retention: 7 days
 //   - --dry-run: only print what would be deleted
 import { readdirSync, statSync, unlinkSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve, basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const BRIDGE = process.env.BRIDGE_PATH || '/root/ODSH-bridge';
@@ -23,6 +23,7 @@ export const PROTECTED = new Set(['.state', 'README.md', '.gitkeep']);
 // Remove stale files in `dir` older than `opts.days` (default 7).
 // opts: { days=7, dryRun=false, label? } — returns count (removed, or would-remove under dryRun).
 export function cleanDir(dir, opts = {}) {
+  if (resolve(dir).split(/[\\/]/).includes('.state')) return 0;
   const days = Number(opts.days) || 7;
   const dryRun = !!opts.dryRun;
   const label = opts.label || dir;
@@ -31,7 +32,9 @@ export function cleanDir(dir, opts = {}) {
   let removed = 0;
   for (const f of readdirSync(dir)) {
     const p = join(dir, f);
-    if (PROTECTED.has(f) || f.startsWith('.')) continue;
+    // Task/result retention needs authority-aware archival, not age-based deletion.
+    // Protect all coordination DB names too, including custom paths and sidecars.
+    if (PROTECTED.has(f) || f.startsWith('.') || /^T-.*(?:\.json|\.tmp)$/.test(f) || /(?:\.db|\.sqlite)(?:-journal|-wal|-shm)?$/.test(f) || f === 'lease-protocol.json') continue;
     let st;
     try { st = statSync(p); } catch { continue; }
     if (!st.isFile()) continue;

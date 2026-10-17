@@ -1,3 +1,23 @@
+# Changelog
+
+## Unreleased — authoritative task leases
+
+- Required local SQLite authority, atomic claim, random owner/token and generation, conditional renewal/completion, transactional terminal result; recoverable JSON projections.
+- Async execution, conservative needs-review on ambiguous effects, explicit retrySafe opt-in, legacy reconciliation and protected retention.
+- Stop all old consumers before migration; daemon requires Node >=22.13. Supported topology uses one host and one common local DB; shared browser resources require separate coordination. See docs/LEASES.md for deployment, migration and recovery.
+
+## Unreleased — dynamic execution and deployment compatibility
+
+- Apply one monotonic connection deadline across TCP, HTTP upgrade and challenge authentication, including partial frame reads; close failed connections while retaining runtime frame and request timeout behavior.
+
+- Fixed complete event-driven HTTP upgrade header reads (64 KiB cap), trailing WebSocket bytes and failed-read connection cleanup.
+- Enforced DSH target isolation, independent envelope expiresMs validation before claim/execution, unknown-kind failures, and cross-platform real-path confinement.
+- Fixed quoted environment comments, finite gateway numeric settings, trigger timeout exit status, exact Cua --version support, notification channel arguments and unknown message action rejection.
+- Mounted container entrypoint scripts, deployed missing scaffold runtime helpers without overwriting custom tools, retained notification default-off with explicit opt-in, and moved CI to Node 22.13/24 with actual isolated daemon startup.
+- 修复目标隔离、信封截止、未知任务、Windows 路径、环境注释、等待超时退出码、版本参数与通知协议；通知默认仍关闭。租约事务、旧令牌与迁移保证不变。
+
+Earlier entries describe behavior at their release date; current requirements are documented in [leases](docs/LEASES.md).
+
 ## [1.3.6] - 2026-08-26
 
 Patch release - **skill copy & license alignment for ClawHub publish**.
@@ -59,7 +79,7 @@ Minor release — **optional SQLite audit side-store**.
 ### Changed
 
 - `npm run check` now also syntax-checks `sqlite-store.mjs` and `sqlite-impl.mjs`.
-- `docs/BRIDGE-SPEC.md`: new §9 documents the optional SQLite layer, schema, enable/disable,
+- [docs/BRIDGE-SPEC.md](docs/BRIDGE-SPEC.md): new §9 documents the optional SQLite layer, schema, enable/disable,
   degradation and security posture.
 
 ---
@@ -80,7 +100,7 @@ envelopes, cross-container trace IDs, and a `purge` subcommand to dshtrigger.
   fresh one; records `span_id` (this hop) and `parent_span_id` (previous hop, else null).
   Every result file now carries a `trace: { trace_id, span_id, parent_span_id }` block.
   Old envelopes without these fields remain fully compatible. Documented in
-  `docs/BRIDGE-SPEC.md` (opt-in, optional fields).
+  [docs/BRIDGE-SPEC.md](docs/BRIDGE-SPEC.md) (opt-in, optional fields).
 - **`dshtrigger purge`** subcommand: `node src/dshtrigger.mjs purge [--days N] [--dry-run]
   [--failed-only]` - reuses `bridge-cleanup`'s retention/delete logic to prune `Output/`
   and `Input/failed/` (default 7 days); `--dry-run` previews, `--failed-only` restricts to
@@ -150,19 +170,13 @@ with zero manual setup.
 
 ---
 
-# Changelog
-
-All notable changes to this project will be documented in this file.
-Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning
-follows [SemVer](https://semver.org/).
-
 ## [1.1.2] — 2026-08-21
 
 Patch release — documentation/example correctness (no functional change).
 
 ### Added
 
-- `ROADMAP.md`: phase-gated long-term plan (ClawHub skill publishing, Cordis plugin
+- [ROADMAP.md](ROADMAP.md): phase-gated long-term plan (ClawHub skill publishing, Cordis plugin
   ecosystem, event bus), linked from README §10 (EN + zh).
 
 ### Fixed
@@ -179,9 +193,8 @@ Patch release — security regression fix + CI.
 
 ### Fixed
 
-- **WS client mask was still constant** `0x01,0x02,0x03,0x04` in the shipped tree (the earlier
-  hardening edit had not persisted); now truly `crypto.randomBytes(4)` per frame. Caught by the
-  new regression suite before you could run it twice.
+- **WS client mask was still constant** `0x01,0x02,0x03,0x04` in the shipped tree; now uses `crypto.randomBytes(4)` per frame. Caught by the
+  per-frame masking requirement.
 - package.json `test` script wired; `npm run check` extended with `bash -n scripts/setup-dsh.sh`.
 
 ### Added
@@ -197,13 +210,7 @@ Patch release — security regression fix + CI.
 ## [1.1.0] — 2026-08-21
 ### Security (v1.1.0 hardening — from a full repo audit)
 
-- **oc-cua.mjs: strict tool-name allowlist** (`^[A-Za-z0-9_][A-Za-z0-9_-]*# Changelog
-
-All notable changes to this project will be documented in this file.
-Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning
-follows [SemVer](https://semver.org/).
-
-) - blocks
+- **oc-cua.mjs: strict tool-name allowlist** (`^[A-Za-z0-9_][A-Za-z0-9_-]*$` — blocks
   command injection into the remote PowerShell/cmd call (e.g. `x\" & whoami & \"` fails closed).
   JSON args stay base64+stdin (safe). `CUA_SSH_USER` is now required (no default).
 - **bridge-daemon: run-command is now argv-allowlisted only** (no `/bin/sh -c`); the old
@@ -228,8 +235,7 @@ follows [SemVer](https://semver.org/).
   `CUA_SSH_USER` no longer defaults to a personal name.
 - **CI (GitHub Actions)**: `.github/workflows/ci.yml` + `tests/security.test.mjs` regression
   suite (syntax, injection fail-closed, secret scan, hardening presence) on every push/PR.
-- **Fix found by CI**: WS client mask was still the constant `0x01,0x02,0x03,0x04` in the
-  worktree (earlier edit not persisted) — now truly `crypto.randomBytes(4)` and guarded by test.
+
 
 ---
 
@@ -240,15 +246,15 @@ removal of the early "Windows Node" experiment.
 
 - **Windows desktop execution via Cua Driver** (`src/oc-cua.mjs`): DSH
   (container) → SSH (key-only, ed25519) → `cua-driver call <tool> '<json>'`
-  on the Windows host. Verified in the real environment: screen size read,
+  on the Windows host: screen size read,
   UIA accessibility tree, full desktop snapshot, browser CDP tools,
-  click/type/hotkey, app launch — all **without stealing focus**.
-- **Guide** `docs/CUA-EXECUTION.md`: Windows-side install (Cua Driver +
+  click/type/hotkey, app launch through the host desktop session.
+- **Guide** [docs/CUA-EXECUTION.md](docs/CUA-EXECUTION.md): Windows-side install (Cua Driver +
   OpenSSH Server + scheduled-task fallback + key placement for
   Administrators), DSH-side SSH key setup, usage examples, verification
   checklist, security posture.
 - **README rewrite** (EN + zh): three-data-flow architecture (realtime /
-  async bridge / desktop execution), verified-features incl. Cua, quick
+  async bridge / desktop execution), features including Cua, quick
   start incl. Cua enablement, .env table incl. `CUA_*`, roadmap F-6/F-7,
   and a **Credits** section thanking the trycua team (Cua Driver).
 - **One-shot setup scripts** (`scripts/setup-windows.ps1` + `scripts/setup-dsh.sh`):
@@ -276,7 +282,7 @@ removal of the early "Windows Node" experiment.
 - **Skill** `skills/odsh-interop/SKILL.md`: routing decision updated —
   DSH can handle Windows desktop tasks via Cua Driver (remove the old
   "DSH has no Windows node capability" assumption).
-- **Bridge spec** `docs/BRIDGE-SPEC.md`: `target: windows-node` kept
+- **Bridge spec** [docs/BRIDGE-SPEC.md](docs/BRIDGE-SPEC.md): `target: windows-node` kept
   reserved (not used) — the Cua channel is the supported desktop path.
 - **package.json**: version 1.1.0; `bin` adds `oc-cua`.
 
@@ -298,7 +304,7 @@ removal of the early "Windows Node" experiment.
 
 ## [1.0.0] — 2026-08-20
 
-Initial release — the first fully verified, publishable release of the
+Initial release of the
 ODSH Bridge (OpenClaw × DeepSeek Harness interop).
 ### Added
 
@@ -306,7 +312,7 @@ ODSH Bridge (OpenClaw × DeepSeek Harness interop).
   client with explicit `Origin` handshake, Ed25519 device pairing
   (`deviceId = hex(SHA-256(public key))`), `connect.challenge` flow, and a
   JSON-RPC-style request/response framing (`request` / `send`). Persistent
-  JWK device identity (approved once, valid forever).
+  JWK device identity (reused while approval remains valid).
 - **CLI tools**: `oc-invoke` (call any gateway method), `oc-send`
   (send/read Discord channel messages via `tools.invoke` + `message` tool),
   `oc-client` (long-lived connect / pairing wait).
@@ -315,9 +321,9 @@ ODSH Bridge (OpenClaw × DeepSeek Harness interop).
   write-file / read-file / bridge-status) → atomic `.tmp`→rename result into
   `Output/<taskId>_result.json` → optional Discord notification.
   Idempotent per `taskId`; tick-level fault tolerance.
-- **Docs**: `PROTOCOL.md` (handshake/frames/error table), `BRIDGE-SPEC.md`
+- **Docs**: [PROTOCOL.md](docs/PROTOCOL.md) (handshake/frames/error table), [BRIDGE-SPEC.md](docs/BRIDGE-SPEC.md)
   (four-zone bridge + envelope schema + state machine).
-- **i18n**: English `README.md` + Chinese `README.zh.md`; code comments
+- **i18n**: English [README.md](README.md) + Chinese `README.zh.md`; code comments
   English-primary with Chinese bilingual notes.
 
 ### Fixed
@@ -326,12 +332,8 @@ ODSH Bridge (OpenClaw × DeepSeek Harness interop).
   layer (`.close()` → `.destroy()` → `.resetAndDestroy()`).
 - Intermittent `device signature invalid` → root cause confirmed: claim
   signature and `device.signedAt` used two separate `Date.now()` calls
-  (millisecond mismatch). Fixed by sharing a single `signedAt`. Verified
-  4/4 consecutive successes (health / agents.list / status / oc-send).
-
+  (millisecond mismatch). Fixed by sharing a single `signedAt`.
 ### Security
 
-- Credentials are placeholders only; real tokens/keys must never be
-  committed (`.gitignore` covers `.env`, `*.jwk`, `*device.json`, `*.tmp`).
 - Gateway origin must be whitelisted in
   `gateway.controlUi.allowedOrigins` (documented).

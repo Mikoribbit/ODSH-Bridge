@@ -16,16 +16,12 @@ between **DeepSeek Harness (DSH)** and **OpenClaw**.
   - Automation/integration engineering on the DSH side:
     - Reverse-engineered the OpenClaw gateway WebSocket handshake
       (explicit `Origin`, Ed25519 device pairing, `connect.challenge` flow).
-    - Implemented and battle-tested the gateway client, envelope bridge,
+    - Implemented the gateway client, envelope bridge,
       and the resident bridge daemon (watch `Input/` → execute → write result → notify).
-    - Diagnosed and fixed two real-world issues now documented in `docs/PROTOCOL.md`:
-      `node:net` ESM has no `Socket.close()` (→ `safeClose` compatibility layer),
-      and the occasional `device signature invalid` (claim `signedAt` vs `device.signedAt`
-      used two `Date.now()` calls — must share a single timestamp).
     - Produced this release package (docs, zero-dependency ESM tools, i18n README).
 
 ## With thanks to
 
 - **OpenClaw** — the brain/persona layer: adopted the `odsh-interop` skill,
-  keeps the long-term memory & dreaming pipeline, and will digest DSH session
+  keeps the long-term memory & dreaming pipeline, and processes shared task
   summaries from `Openclaw-Workspace/dream-feed/`.

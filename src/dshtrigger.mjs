@@ -8,6 +8,7 @@
 //   node dshtrigger.mjs once
 import { readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, renameSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawn } from 'node:child_process';
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -21,8 +22,8 @@ const STATE = join(INPUT, '.state');
 const STATE_F = join(STATE, 'dsh-processed.json');
 const pick = (...paths) => { for (const p of paths) if (p && existsSync(p)) return p; return paths[paths.length - 1] || null; };
 const DAEMON = process.env.ODSH_DAEMON || pick(join(__dirname, 'bridge-daemon.mjs'), join(__dirname, 'dsh_bridge.mjs'));
-const SENDS = process.env.ODSH_SEND || pick(join(__dirname, 'oc-send.mjs'), join(__dirname, 'oc_send.mjs'));
-const OCCUA = process.env.ODSH_CUA || pick(join(__dirname, 'oc-cua.mjs'), join(__dirname, 'oc_cua.mjs'));
+const SENDS = process.env.ODSH_SEND || process.env.OC_SEND_SCRIPT || pick(join(__dirname, 'oc-send.mjs'), join(__dirname, 'oc_send.mjs'));
+const OCCUA = process.env.ODSH_CUA || process.env.OC_NODE_SCRIPT || pick(join(__dirname, 'oc-cua.mjs'), join(__dirname, 'oc_cua.mjs'));
 const CHANNEL = process.env.OC_CHANNEL || process.env.DISCORD_CHANNEL_ID || '';
 
 mkdirSync(STATE, { recursive: true });
@@ -65,11 +66,11 @@ async function triggerSend() {
   const kind = arg('--kind', 'echo');
   const text = arg('--text', '');
   const timeout = Number(arg('--timeout', '60000')) || 60000;
-  const taskId = 'T-' + new Date().toISOString().replace(/\D/g, '').slice(0, 14) + '-trigger';
-  const task = { schema: 'odsh-task/v1', taskId, id: taskId, type: 'task', status: 'queued', requester: 'dsh-trigger', target: arg('--to', 'openclaw'), createdMs: Date.now(), payload: { kind, text, from: 'dsh-trigger' } };
+  const taskId = 'T-' + randomUUID() + '-trigger';
+  const task = { schema: 'odsh-envelope/v1', taskId, id: taskId, type: 'execute', status: 'queued', requester: 'dsh-trigger', target: arg('--to', 'openclaw'), createdMs: Date.now(), payload: { kind, text, from: 'dsh-trigger' } };
   const path = join(INPUT, taskId + '.json');
-  writeFileSync(path + '.tmp', JSON.stringify(task, null, 2));
-  try { renameSync(path + '.tmp', path); } catch { unlinkSync(path + '.tmp'); writeFileSync(path, JSON.stringify(task, null, 2)); }
+  writeFileSync(path + '.tmp', JSON.stringify(task, null, 2), { flag: 'wx', mode: 0o600 });
+  renameSync(path + '.tmp', path);
   log('envelope written', path);
   const resultPath = join(OUTPUT, taskId + '_result.json');
   const t0 = Date.now();
@@ -77,12 +78,12 @@ async function triggerSend() {
     if (existsSync(resultPath)) {
       const r = j(resultPath);
       log('result', JSON.stringify(r || {}).slice(0, 400));
-      if (NOTIFY && r && r.human && SENDS && CHANNEL) { try { execFileSync(process.execPath, [SENDS, CHANNEL, r.human], { timeout: 25000, encoding: 'utf8' }); } catch {} }
+      if (NOTIFY && r && r.human && SENDS && CHANNEL) { try { execFileSync(process.execPath, [SENDS, r.human, '--channel', CHANNEL], { timeout: 25000, encoding: 'utf8' }); } catch {} }
       return r;
     }
     await new Promise(res => setTimeout(res, 500));
   }
-  return { error: 'timeout', waitedMs: timeout, resultPath };
+  return { error: 'timeout', waitedMs: timeout, resultPath, cancelled: false, warning: 'Waiting stopped; task/remote work may still execute. Do not blindly resend.' };
 }
 
 if (MODE === 'daemon') {
@@ -102,13 +103,16 @@ if (MODE === 'daemon') {
   start();
   await new Promise(() => {});
 } else if (MODE === 'send') {
-  console.log(JSON.stringify(await triggerSend(), null, 2)); process.exit(0);
+  const result = await triggerSend();
+  console.log(JSON.stringify(result, null, 2));
+  process.exit(result?.error || ['failed', 'cancelled', 'needs-review'].includes(result?.status) ? 1 : 0);
 } else if (MODE === 'status') {
   console.log(JSON.stringify(statusObj(), null, 2)); process.exit(0);
 } else if (MODE === 'once') {
   if (!DAEMON || !existsSync(DAEMON)) { console.error('daemon script not found'); process.exit(2); }
-  try { log((execFileSync(process.execPath, [DAEMON, '--once'], { timeout: 30000, encoding: 'utf8' })).trim()); } catch (e) { console.error('once err', e.message); }
-  process.exit(0);
+  const child = spawn(process.execPath, [DAEMON, '--once'], { stdio: 'inherit' });
+  child.on('error', e => { console.error('once err', e.message); process.exitCode = 1; });
+  child.on('exit', code => { process.exitCode = code ?? 1; });
 } else if (MODE === 'purge') {
   // 死信/过期文件清理:default 清理 Output/ 与 Input/failed/ 里超过 N 天(默认 7)的文件。
   // --dry-run 只预览不删;--failed-only 只清理 DLQ(Input/failed/)。

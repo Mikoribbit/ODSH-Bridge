@@ -43,7 +43,7 @@ if (!TOOL) {
 }
 // SECURITY: the tool name is interpolated into a remote PowerShell/cmd command, so it must be a
 // strict identifier. Reject anything else (blocks injection like: x" & whoami & ").
-if (!/^[A-Za-z0-9_][A-Za-z0-9_-]*$/.test(TOOL)) {
+if (TOOL !== '--version' && !/^[A-Za-z0-9_][A-Za-z0-9_-]*$/.test(TOOL)) {
   console.error('[oc-cua] invalid tool name: ' + JSON.stringify(TOOL));
   process.exit(78);
 }

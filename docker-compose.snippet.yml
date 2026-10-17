@@ -26,6 +26,11 @@ services:
       - ${ODSH_BRIDGE_HOST_DIR:-./bridge}:/root/ODSH-bridge    # shared bridge (identical on both sides)
       - ./src:/opt/odsh-bridge/src:ro
       - ./.env:/opt/odsh-bridge/.env:ro
+    env_file: .env
+    environment:
+      OC_ENV_FILE: /opt/odsh-bridge/.env
+      OC_SEND_SCRIPT: /opt/odsh-bridge/src/oc-send.mjs
+      OC_NODE_SCRIPT: /opt/odsh-bridge/src/oc-cua.mjs
     # optional: keep the DSH container resident and host the daemon (command depends on your image entrypoint, ⚠️ verify yourself)
     # command: /bin/sh -c "cd /opt/odsh-bridge && node src/bridge-daemon.mjs --notify --interval-ms 5000 & exec /entrypoint.sh"
 

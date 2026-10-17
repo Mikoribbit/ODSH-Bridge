@@ -1,6 +1,6 @@
 # ODSH Bridge Directory-Bridge Spec (BRIDGE-SPEC)
 
-Corresponds to `src/bridge-daemon.mjs` and the four-zone bridge at `/root/ODSH-bridge` in the verified environment. Principle: all cross-container collaboration happens via envelopes — machine-readable, retryable, traceable.
+Corresponds to `src/bridge-daemon.mjs` and the four-zone bridge at `/root/ODSH-bridge` in a local deployment. Principle: all cross-container collaboration happens via envelopes — machine-readable, retryable, traceable.
 
 ## 1. Directory Overview (Four Zones)
 
@@ -23,7 +23,7 @@ Both containers mount it to the same host directory (host path is operator-chose
   "type": "execute | query | notify | bridge-status | interop",
   "status": "queued",
   "requester": "dsh | openclaw | human",
-  "target": "dsh | openclaw | both",   // (windows-node kept reserved in daemon for back-compat; desktop execution goes through the Cua channel, see docs/CUA-EXECUTION.md)
+  "target": "dsh | openclaw | both",
   "createdMs": 1787249900000,
   "trace_id": "1ac9e2f4-... (optional)",
   "parent_span_id": "f3e18c7b-... (optional, previous hop's span)",
@@ -38,8 +38,8 @@ Both containers mount it to the same host directory (host path is operator-chose
 Required: `taskId / type / status / requester / target / createdMs / payload`; `expiresMs / context / result / trace_id / span_id / parent_span_id` optional. The trace fields are optional cross-container tracing extensions (see §4.1) and never required for old envelopes.
 
 > ⚠️ **target routing (v1.2.1+)** — the DSH-side daemon (`dshtrigger daemon`) only
-> consumes envelopes whose `target` is `dsh` (or unset). Envelopes with
-> `target: openclaw` are left in `Input/` untouched (marked deferred) so an
+> consumes envelopes whose `target` is `dsh`, `both`, or unset. Envelopes with
+> `target: openclaw` are left in `Input/` untouched (without a DSH claim) so an
 > OpenClaw-side consumer can pick them up — DSH never eats OpenClaw's mail. This
 > makes the bridge symmetric: DSH avoids clobbering OpenClaw-bound tasks. An
 > `OpenClaw`-side watcher is what consumes those.
@@ -47,15 +47,15 @@ Required: `taskId / type / status / requester / target / createdMs / payload`; `
 ## 3. State Machine
 
 ```
-queued -> running -> done
-   |          |        -> failed (with error)
-   |          +-> failed (timeout/abandoned)
-   +-> cancelled
+queued -> running -> done / failed / needs-review
+             |
+             +-> expired -> needs-review (default)
+                        -> running (explicit retrySafe=true)
 ```
 
 Advancement rules:
 
-- The writer may update `status` in the envelope at each step, or just write the result file;
+- Publish an immutable envelope; SQLite authority records progress and terminal results;
 - The reader **must not modify the original Input file**; results go to `Output/<taskId>_result.json`;
 - Atomic write: always write `.tmp` first, then `rename` (mv) to the final name, so the peer never reads a half-written file.
 - zh: 原子写规则：先写 .tmp 再 rename 成正式名，防止对端读到半截文件。
@@ -66,7 +66,7 @@ Advancement rules:
 {
   "schema": "odsh-result/v1",
   "taskId": "T-260820-01",
-  "status": "done | failed | cancelled",
+  "status": "done | failed | needs-review | cancelled",
   "finishedMs": 1787249903000,
   "by": "dsh | openclaw",
   "trace": { "trace_id": "...", "span_id": "...", "parent_span_id": null },
@@ -93,29 +93,17 @@ fields, all optional):
 Old envelopes lacking these fields remain fully compatible: the daemon synthesizes
 `trace_id`/`span_id` and leaves `parent_span_id` null. No required envelope field is
 touched, so existing producers are unaffected.
-### 4.2 Dead-letter queue (DLQ) 1.3.1+
+### 4.2 Review and recovery
 
-An envelope that is **unparsable** or **throws an uncaught exception** while being
-processed is a defect, not a regular task failure. To stop it being re-tried every
-scan (which would wedge the scheduler), the daemon atomically moves the original
-envelope into `Input/failed/` and writes a companion `<taskId>.error.json` report
-(schema `odsh-dlq/v1`) with `failedAt`, the original `taskId`, the error
-`message`/`stack`, and the original payload. Both writes use the `.tmp` then
-`rename` atomic-write discipline.
-
-Expected failures - a payload handler that **returns** `{ error: ... }` (for example a
-`run-command` exiting non-zero) - are NOT dead-lettered; they still produce a normal
-`failed` result in `Output/`. Only parse failures and uncaught exceptions enter the
-DLQ. `dshtrigger purge --failed-only` prunes it and `dshtrigger status` reports the
-live dead-letter count.
+Malformed envelopes and identity/content conflicts remain in Input for operator review. Handler errors produce failed results; uncertain execution produces needs-review. Authority or projection errors stop the current scan. See [leases](LEASES.md) for migration and recovery.
 
 ## 5. Naming & Conflict Avoidance
 
-- Task ids: `T-<YYMMDD>-<two-digit sequence>` (e.g. `T-260820-01`); the daemon uses the **envelope filename basename** as the taskId (`T-*.json`).
+- Task ids: ASCII T-[A-Za-z0-9_.-]+, unique under ASCII case folding (for example T-260820-01); the daemon uses the **envelope filename basename** as the taskId (`T-*.json`).
 - Results: same id + `_result.json`; attachments: `Output/<taskId>_att-<sequence>.<ext>`.
-- Each side maintains `Input/.state/<requester>.json` recording processed ids to avoid duplicates (DSH side: `dsh-processed.json`).
+- DSH task ownership and terminal results are authoritative in `Input/.state/leases.db`; `dsh-processed.json` is a recoverable projection, not a lock or independent replay guard (see LEASES.md).
 
-## 6. payload.kind (implemented and verified by the DSH daemon)
+## 6. payload.kind (implemented by the DSH daemon)
 
 | kind | payload fields | output |
 |---|---|---|
@@ -126,33 +114,32 @@ live dead-letter count.
 | read-file | `args.file` | `{content}` (truncated to 4000 chars) |
 | bridge-status | — | `{input,output}` file counts |
 
-Operational details (matching the verified environment):
+Operational details (execution behavior):
 
-- `run-command`: `/bin/sh -c`, 15 s timeout, stdout truncated at 4000; first-word charset validation (forbids `;`, `&`, `|` and backtick characters) refuses execution.
-- `write-file / read-file`: absolute paths are used directly; relative paths resolve against the bridge root; the release build adds `BRIDGE_ALLOW_ABS_PATHS` (default `false`) to disable absolute paths ⚠️ `false` is the recommended safe default — adjust per your trust model.
+- `run-command`: fixed executable allowlist and literal argv (no shell), 15 s timeout, stdout truncated at 4000. Trusted producers are still required because allowed interpreters can execute code.
+- `write-file / read-file`: relative paths resolve below the bridge root. BRIDGE_ALLOW_ABS_PATHS=true permits absolute syntax only within that root. Real-path checks enforce confinement; write-file protects Input, Output and the authority path.
 - Scan interval: `--interval-ms` (default 5000); `--once` for a single pass; already-processed ids are skipped (idempotent).
 
-## 7. Atomic Write Example (inside the daemon)
+## 7. Authority and result projection
 
-```js
-writeFileSync(tmp, JSON.stringify(result, null, 2)); // <taskId>_result.json.tmp
-renameSync(tmp, fin);                                // → <taskId>_result.json
-```
+Node >=22.13 and the common local Input/.state/leases.db are required. Claims are transactional; asynchronous execution renews every TTL/4 and immediately before execution. Renewal and completion require matching owner, token, generation, running state and an unexpired lease. Terminal state and result commit together. Output JSON and dsh-processed.json are rebuilt projections, written with unique temporary filenames under a serialized transaction.
+
+Optional expiresMs is a finite absolute Unix-millisecond deadline checked before claim/execution, distinct from the renewable lease TTL. See [migration, retry safety and recovery](LEASES.md).
 
 ## 8. Security
 
 - Four-zone ownership: DSH never enters Openclaw-Workspace, OpenClaw never enters DSH-Workspace; the identity JWK belongs exclusively to DSH-Workspace.
-- `run-command` has execution capability: only open to envelope requesters that are trusted/whitelisted; the release build keeps the original validation as-is (first-word charset check), and production deployments should add a requester whitelist.
-- All files UTF-8 + LF; sensitive data never committed (`.env` / gitignore already exclude it).
+- `run-command` has execution capability: only open to trusted/whitelisted envelope requesters; the executable allowlist is not a sandbox, and production deployments should configure the requester whitelist.
+- All files UTF-8 + LF; store credentials in deployment-managed files with restricted access.
 
 ---
 
 ## 9. Optional SQLite audit side-store (v1.3.1)
 
-An additive, **non-required** auditing layer. The core bridge always stays on the JSON
-file store (`.state/dsh-processed.json` + `Output/*_result.json`) — nothing here
-replaces it. When the DSH runtime provides Node's built-in `node:sqlite` (Node >=22.5)
-**and** `BRIDGE_SQLITE` is enabled, the daemon additionally mirrors task rows into
+An additive, **non-required** auditing layer, separate from the required lease
+SQLite authority (daemon requires Node >=22.13). JSON cache/result files are
+recoverable projections, not the core authority. When `BRIDGE_SQLITE` is enabled,
+the daemon additionally mirrors task rows into
 `<BRIDGE>/DSH-Workspace/dsh.db` for queryable history, aggregates and audit.
 
 - **Enable**: `new-bridge.sh` detects `node:sqlite` availability at setup and writes

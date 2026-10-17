@@ -1,14 +1,8 @@
 # Quick Start
 
-> ⚠️ **Self-starting daemon (v1.2+)**: the DSH container auto-starts the bridge daemon at boot
-> (`scripts/dsh-entrypoint.sh` → `src/dshtrigger.mjs daemon`). OpenClaw can drop a `T-*.json`
-> envelope into `Input/` at any time and DSH executes it — **no manual daemon step**, and the
-> daemon self-heals (a crashed child restarts automatically).
-
 ## 1. Prerequisites
 
-- **Docker** (Docker Desktop on Windows/macOS, or Docker Engine + compose on Linux; Podman with
-  compose-compatible flags also works for the bridge core). ODSH Bridge is a two-container idea:
+- **Docker** (Docker Desktop on Windows/macOS, or Docker Engine + compose on Linux; the supplied examples use Compose). ODSH Bridge is a two-container idea:
   OpenClaw (brain / gateway) + DeepSeek Harness (DSH, execution layer) on one docker network.
 - **Two images**:
   - OpenClaw — official `openclaw/openclaw:latest` (Docker Hub).
@@ -19,7 +13,7 @@
     ```
 - Both containers on the same docker network (this repo's example name `agent-mesh`), each able to
   reach the other by container name.
-- OpenClaw gateway allowed origins must include the origin you use (see `docs/PROTOCOL.md` §2.1).
+- OpenClaw gateway allowed origins must include the origin you use (see [docs/PROTOCOL.md](PROTOCOL.md) §2.1).
 
 ## 2. Scaffold the bridge — interactive wizard (recommended)
 
@@ -27,7 +21,7 @@ One command walks you through every value with a visual prompt; **press Enter to
 bracketed default**, type to override, and answer yes/no prompts.
 
 ```bash
-cd odsh-bridge
+cd ODSH-Bridge
 chmod +x scripts/new-bridge.sh
 ./scripts/new-bridge.sh          # interactive wizard
 ```
@@ -45,50 +39,61 @@ You'll be asked, in order:
 | Discord channel id | *(none)* | for completion notifications (optional) |
 | generate docker-compose.yaml? | `y` | writes a ready-to-run compose into the bridge dir |
 | enable Cua Desktop channel? | `n` | optional Windows desktop execution (see §5) |
-| Windows SSH username | `whoami` | only if Cua enabled |
+| SQLite audit store | y when node:sqlite is available | Optional audit; task authority is required separately |
+| Windows SSH username | `id -un` | only if Cua enabled |
 
 The wizard copies the four zones (`Input/ Output/ DSH-Workspace/ Openclaw-Workspace/`), writes a
 `.env` with `BRIDGE_PATH` pointed at your mount path, and (if chosen) a `docker-compose.yaml`
-whose volumes mount `<host-dir>` → `<bind>`.
+whose volumes mount `<host-dir>` → `<bind>`. Choose /srv/odsh-bridge for the commands below.
 
-> **Non-interactive one-liner** still works (same result, no prompts):
+> **Non-interactive one-liner** still works (no prompts; add --no-compose to manage Compose yourself):
 > ```bash
-> ./scripts/new-bridge.sh /srv/odsh-bridge --no-compose
+> ./scripts/new-bridge.sh /srv/odsh-bridge
 > ```
+
+## First initialization and paths
+
+Use Node >=22.13 and a reliable local filesystem with SQLite process locks. All consumers share the same physical authority DB and container mount path. The supported topology is local to one host; SMB/NFS and cross-host sharing are outside that scope.
+
+Commands below assume /srv/odsh-bridge on the host and /root/ODSH-bridge in containers; substitute your Windows host path as needed. The wizard writes .env and docker-compose.yaml in the bridge directory and copies helpers into DSH-Workspace/tools. Rerunning rewrites the environment and generated compose while preserving existing tools; back up configuration and reconcile customized helpers first. Substitute service names too if customized.
+
+Before startup, fill OC_TOKEN and confirm the image provides Node and the entrypoint command pnpm dsh web. For first initialization or migration, stop all consumers and supervisors, back up Input, Output and state together, then temporarily set BRIDGE_LEASE_UPGRADE=all-consumers-stopped in the generated .env. Remove it after initialization and recreate the DSH service. See [lease migration](LEASES.md).
 
 ## 3. Bring up the containers
 
 ```bash
-docker compose up -d          # from the generated docker-compose.yaml (or the repo one)
+docker compose -f /srv/odsh-bridge/docker-compose.yaml up -d
 ```
 
 - The **DSH container auto-starts the bridge daemon** via its `entrypoint` (self-starting, no manual step).
 - Verify it is alive:
 ```bash
-node src/dshtrigger.mjs status        # shows health: { running: true, pid: … }
+docker compose -f /srv/odsh-bridge/docker-compose.yaml exec deepseek-harness node /root/ODSH-bridge/DSH-Workspace/tools/dshtrigger.mjs status        # shows health: { running: true, pid: … }
 ```
 
 ## 4. Pair once + verify
 
 ```bash
-# inside the DSH container, repo root
-node src/oc-client.mjs connect
+# Run from the host; approve the device in the OpenClaw Control UI.
+docker compose -f /srv/odsh-bridge/docker-compose.yaml exec deepseek-harness node /root/ODSH-bridge/DSH-Workspace/tools/oc-client.mjs connect
 #   first run prints "device not approved" → approve that deviceId in the OpenClaw Control UI.
 ```
 
-Then confirm end-to-end:
+The pairing client holds its connection; use another terminal for the task round-trip:
 
 ```bash
-node src/dshtrigger.mjs send --kind echo --text "hello"     # drop an envelope, get a result
+docker compose -f /srv/odsh-bridge/docker-compose.yaml exec deepseek-harness node /root/ODSH-bridge/DSH-Workspace/tools/dshtrigger.mjs send --to dsh --kind echo --text "hello"     # drop an envelope, get a result
 ```
 
 ## 5. Optional — Windows desktop execution (Cua Driver)
 
-> Full guide: `docs/CUA-EXECUTION.md`. Fastest path — two idempotent one-shot scripts:
+> Full guide: [docs/CUA-EXECUTION.md](CUA-EXECUTION.md). Fastest path — two idempotent one-shot scripts:
 
 ```powershell
 .\scripts\setup-windows.ps1 -BridgePath C:\ODSH-bridge
 ```
+Run the following from the source checkout inside the DSH container (mount or copy the checkout first).
+
 ```bash
 ./scripts/setup-dsh.sh --bridge /root/ODSH-bridge --host host.docker.internal
 ```
@@ -98,6 +103,6 @@ Each script detects what is already set up and skips it; they write `windows-con
 
 ## 6. Next
 
-- **Config / `.env` fields / directory**: `docs/CONFIGURATION.md`
-- **Standalone vs Cordis-plugin**: `docs/INTEGRATIONS.md`
-- **Real ops, security, troubleshooting**: `docs/OPERATIONS.md`
+- **Config / `.env` fields / directory**: [docs/CONFIGURATION.md](CONFIGURATION.md)
+- **Standalone vs Cordis-plugin**: [docs/INTEGRATIONS.md](INTEGRATIONS.md)
+- **Real ops, security, troubleshooting**: [docs/OPERATIONS.md](OPERATIONS.md)

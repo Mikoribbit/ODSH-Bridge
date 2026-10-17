@@ -3,7 +3,7 @@
 // Rules:
 //   - Reads .env from the current working directory by default; override the path with OC_ENV_FILE;
 //   - Already-set process environment variables take priority (variables exported in the shell are not overridden by .env);
-//   - Supports `#` comment lines and simple quoting; does not support inline comments or multi-line values.
+//   - Supports comments outside quotes and single-line quoted values; no multi-line values.
 import { existsSync, readFileSync } from 'node:fs';
 
 export function loadEnvFile(file = process.env.OC_ENV_FILE || '.env') {
@@ -15,12 +15,18 @@ export function loadEnvFile(file = process.env.OC_ENV_FILE || '.env') {
     if (eq < 0) continue;
     const key = line.slice(0, eq).trim();
     let value = line.slice(eq + 1).trim();
-    if (value.length >= 2 && (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    )) {
-      value = value.slice(1, -1);
-    }
+    if (value.startsWith('"') || value.startsWith("'")) {
+      const quote = value[0];
+      let end = 1;
+      while (end < value.length) {
+        if (quote === '"' && value[end] === '\\') { end += 2; continue; }
+        if (value[end] === quote) break;
+        end++;
+      }
+      if (end >= value.length || !/^\s*(?:#.*)?$/.test(value.slice(end + 1))) throw new Error('invalid quoted environment value: ' + key);
+      value = value.slice(1, end);
+      if (quote === '"') value = value.replace(/\\([\\"nr])/g, (_, c) => c === 'n' ? '\n' : c === 'r' ? '\r' : c);
+    } else value = value.split('#', 1)[0].trim();
     if (!(key in process.env)) process.env[key] = value;
   }
 }

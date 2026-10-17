@@ -2,11 +2,8 @@
 
 > ODSH Bridge 1.1 的核心能力：让容器里的 **DeepSeek Harness（DSH）执行层**，通过
 > **SSH + [Cua Driver](https://github.com/trycua/cua)（trycua/cua, v0.21+）**，直接操作
-> **Windows 宿主机的真实桌面**——截图、点击、键盘、浏览器、系统命令，且**不偷焦点**。
+> **Windows 宿主机的真实桌面**——截图、点击、键盘、浏览器、系统命令，使用宿主桌面会话。
 >
-> 本通道取代了早期版本的 "OpenClaw Windows Node" 路径：更轻（无 Desktop、无常驻 node 服务），
-> DSH 自身即执行层，OpenClaw 只负责大脑/路由（见 README 架构图）。
-
 ---
 
 ## 架构
@@ -19,7 +16,7 @@ DSH (容器) ──SSH(22, ed25519 免密)──► Windows 宿主
 
 - **SSH**：容器 → Windows 的命令通道（OpenSSH Server，公钥免密）
 - **Cua Driver**：Windows 侧的"手和眼"——真实桌面工具（`get_desktop_state`、
-  `browser_navigate`、`click`、`launch_app` 等），后台执行不抢焦点
+  `browser_navigate`、`click`、`launch_app` 等），在宿主桌面会话执行
 - **DSH 侧封装**：`src/oc-cua.mjs` 把 "调用 cua 工具" 翻译成一条 SSH 远程命令
 
 ---
@@ -64,7 +61,9 @@ DSH (容器) ──SSH(22, ed25519 免密)──► Windows 宿主
 
 ```powershell
 # PowerShell（免管理员、官方脚本）
-irm https://cua.ai/driver/install.ps1 | iex
+Invoke-WebRequest https://cua.ai/driver/install.ps1 -OutFile install-cua.ps1
+# 阅读下载的安装脚本后运行
+.\install-cua.ps1
 # 验证
 cua-driver --version        # ≥ 0.21.0
 ```
@@ -173,7 +172,7 @@ node src/oc-cua.mjs kill_app '{"pid":1234}'
 
 ---
 
-## 4. 验证清单（写自动化测试脚本时可复用）
+## 4. 连接检查
 
 | 检查 | 命令 | 期望 |
 |---|---|---|
@@ -191,5 +190,10 @@ node src/oc-cua.mjs kill_app '{"pid":1234}'
   ODSH Bridge 仅作为其一个远程调用封装；上手指引、安装与权限均由 Cua 官方提供。
 - SSH 免密只允许**这台 DSH 容器**（固定 host/key）访问；`BatchMode=yes` 禁止交互式密码，
   降低被暴力破解面。
-- cua-driver 后台模式**不偷焦点**（`launch_app` 使用 SW_SHOWNOACTIVATE），桌面不被抢占。
 - 生产部署建议：把 `CUA_SSH_*` 放进受控环境变量（勿入库）；Windows 侧公钥仅授权你信任的容器。
+
+## 超时与任务协调
+
+工具名使用严格标识符，仅精确允许 --version；list-tools、doctor、status、manifest、telemetry 作为子命令转发，其余调用通过编码 JSON 与标准输入传参。CUA_TIMEOUT_MS 默认 60000 ms；SSH 连接等待 10 秒。兼容 run-node/windows-node 信封的外层子进程超时固定 60000 ms。
+
+超时或终止本地 SSH 不能证明远端操作停止。共享桌面使用单一执行器或外部资源锁；[任务租约](LEASES.md)只约束任务与结果提交。恢复前确认外部副作用。setup-dsh.sh 的连接探测当前使用 StrictHostKeyChecking=no；在受控网络安装并独立核对宿主指纹，正式 oc-cua 调用使用 accept-new 与固定 known_hosts。

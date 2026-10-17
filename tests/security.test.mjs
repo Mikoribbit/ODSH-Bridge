@@ -4,8 +4,9 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const ROOT = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
+const ROOT = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]$/, '');
 let failures = 0;
 function ok(name){ console.log('  ✓ ' + name); }
 function fail(name, detail=''){ failures++; console.error('  ✗ ' + name + (detail ? ' :: ' + detail : '')); }
@@ -49,7 +50,7 @@ assert(!srcBD.includes("execFileSync('/bin/sh'"), 'no /bin/sh -c execution');
 assert(srcBD.includes('resolveTarget'), 'path confinement helper exists');
 assert(srcBD.includes('BRIDGE_ALLOW_ABS_PATHS'), 'abs-path flag wired');
 assert(srcBD.includes('ALLOW_REQUESTERS'), 'requester allowlist wired');
-assert(srcBD.includes('renameSync') || srcBD.includes('mode: 0o600'), 'atomic state write');
+assert(srcBD.includes('authority.complete') && readFileSync(join(ROOT, 'src/lease-store.mjs'), 'utf8').includes('BEGIN IMMEDIATE'), 'transactional authoritative state write');
 
 // ---- 4) gateway hardening present ----
 console.log('gateway-client hardening:');
@@ -74,7 +75,7 @@ for (const f of ALL_FILES) {
   try { const txt = readFileSync(f,'utf8');
     for (const pat of secretPats) {
       const m = txt.match(pat);
-      const rel = f.replace(ROOT+'/','');
+      const rel = f.slice(ROOT.length + 1).replaceAll('\\', '/');
       // skip the CHANGELOG/README lines that deliberately mention the pattern in prose
       if (m && !allowed.includes(rel)) fail('secret pattern '+pat+' in '+rel);
     }
@@ -86,7 +87,7 @@ ok('no obvious secrets outside allowed docs');
 console.log('scripts:');
 assert(existsSync(join(ROOT,'scripts','setup-dsh.sh')), 'setup-dsh.sh exists');
 assert(existsSync(join(ROOT,'scripts','setup-windows.ps1')), 'setup-windows.ps1 exists');
-try { execFileSync('bash', ['-n', join(ROOT,'scripts','setup-dsh.sh')]); ok('bash -n setup-dsh.sh'); } catch(e){ fail('bash -n', e.message); }
+try { execFileSync('bash', ['-n', 'scripts/setup-dsh.sh'], { cwd: ROOT }); ok('bash -n setup-dsh.sh'); } catch(e){ fail('bash -n', e.message); }
 
 
 // ---- 7) private username / hostname must NOT leak into the public repo ----
@@ -98,7 +99,7 @@ const sensitiveNames = ['miko', '897322599', 'mikopc', 'vstarphoto', '0vstar'];
 const allowedPrivacy = ['AUTHORS.md','CHANGELOG.md','README.md','README.zh.md','docs/CUA-EXECUTION.md','tests/security.test.mjs'];
 for (const f of ALL_FILES) {
   if (!existsSync(f)) continue;
-  const rel = f.replace(ROOT + '/', '');
+  const rel = f.slice(ROOT.length + 1).replaceAll('\\', '/');
   if (allowedPrivacy.includes(rel)) continue;   // prose/docs may reference historical names by consent
   try {
     const txt = readFileSync(f, 'utf8');
@@ -115,7 +116,7 @@ ok('no tracked personal identifiers outside consented docs');
 
 // ---- 8) SQLite store smoke test (Node >=22.5 only; older runtimes: skip) ----
 console.log('sqlite optional store:');
-(async () => {
+await (async () => {
   const major = Number(process.versions.node.split('.')[0]);
   if (major < 22 || (major === 22 && Number(process.versions.node.split('.')[1] ?? 0) < 5)) {
     ok('skipped (node:sqlite requires Node >=22.5; running on ' + process.versions.node + ')');
@@ -123,7 +124,7 @@ console.log('sqlite optional store:');
     console.log('\nALL SECURITY TESTS PASSED'); process.exit(0);
   }
   try {
-    const { initSqlite, sqliteActive, recordEnvelope, closeSqlite } = await import(join(ROOT,'src','sqlite-store.mjs'));
+    const { initSqlite, sqliteActive, recordEnvelope, closeSqlite } = await import(pathToFileURL(join(ROOT,'src','sqlite-store.mjs')).href);
     const { mkdtempSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
     const { join: j } = await import('node:path');

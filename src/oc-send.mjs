@@ -35,7 +35,11 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--raw') raw = true;
   else text = a;
 }
-if (text === null) usage();
+if (!['send', 'read'].includes(action)) {
+  console.error('[!] unsupported action: ' + action + ' (expected send|read)');
+  process.exit(64);
+}
+if (text === null && action === 'send') usage();
 if (!channelId) {
   console.error('[!] missing channelId: pass it with --channel, or set DISCORD_CHANNEL_ID.');
   process.exit(64);

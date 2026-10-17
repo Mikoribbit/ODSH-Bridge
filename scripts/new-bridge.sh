@@ -88,6 +88,15 @@ if [ "$INTERACTIVE" = 0 ]; then
   [ "$SQLITE_SUPPORTED" = 1 ] && BRIDGE_SQLITE=1 || BRIDGE_SQLITE=0
 fi
 
+# Deploy the runtime referenced by generated compose; never overwrite customized tools.
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TOOLS="$HOST_DIR/DSH-Workspace/tools"
+mkdir -p "$TOOLS"
+for source in "$REPO_ROOT"/src/*.mjs "$REPO_ROOT/scripts/dsh-entrypoint.sh"; do
+  destination="$TOOLS/$(basename "$source")"
+  if [ ! -e "$destination" ]; then cp "$source" "$destination"; else warn "preserved existing $destination; reconcile runtime updates before starting"; fi
+done
+
 # ---- .env
 ENVFILE="$HOST_DIR/.env"
 cat > "$ENVFILE" <<EOF
@@ -99,7 +108,9 @@ OC_HOST=$OC_NAME
 OC_PORT=$OC_PORT
 OC_TOKEN=$TOKEN
 DISCORD_CHANNEL_ID=$CHANNEL
-OC_SEND_SCRIPT=
+OC_SEND_SCRIPT=$BIND/DSH-Workspace/tools/oc-send.mjs
+OC_NODE_SCRIPT=$BIND/DSH-Workspace/tools/oc-cua.mjs
+ODSH_NOTIFY=0
 CUA_SSH_USER=$CUA_USER
 # SQLite optional audit side-store (only meaningful on Node with node:sqlite)
 BRIDGE_SQLITE=$(case "$BRIDGE_SQLITE" in y|Y|yes|1) echo 1;; *) echo 0;; esac)
@@ -125,6 +136,9 @@ services:
     ports: ["127.0.0.1:3080:3080"]
     volumes:
       - "$HOST_DIR:$BIND"
+    env_file: .env
+    environment:
+      OC_ENV_FILE: "$BIND/.env"
     entrypoint: ["/bin/sh", "$BIND/DSH-Workspace/tools/dsh-entrypoint.sh"]
     restart: unless-stopped
 networks:

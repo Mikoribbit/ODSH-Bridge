@@ -6,7 +6,7 @@
 [**中文**](https://github.com/Mikoribbit/ODSH-Bridge/blob/main/README.zh.md)
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
-![Node](https://img.shields.io/badge/Node-%3E%3D18-green.svg)
+![Node](https://img.shields.io/badge/Node-%3E%3D22.13-green.svg)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)
 ![Platform](https://img.shields.io/badge/platform-Docker%2Fagent--mesh-blue.svg)
 
@@ -15,28 +15,14 @@
 > **一句话定位**：让 DeepSeek Harness（DSH，执行层）通过 WebSocket 连接 OpenClaw（大脑/人格层）网关，
 > 借助共享目录桥（信封 + 守护进程）在两侧容器间可靠交接任务；**自 v1.1 起**，还能通过
 > **SSH + [Cua Driver](https://github.com/trycua/cua)** 操作**宿主机上的真实 Windows 桌面**
-> （截图 / 点击 / 浏览器 / 系统操作，不偷焦点；无需 OpenClaw Desktop，也无需专用节点守护进程）。
+> （截图 / 点击 / 浏览器 / 系统操作）。
 
-> 本仓库全部内容来自 2026-08 在 docker `agent-mesh` 网络上**真实跑通并验证**的集成；
-> 未验证或猜测的内容一律标注 `⚠️ 请自行验证`。
-> 所有凭据均为占位符——仓库中**绝不出现真实 token/密钥**。
 
 ---
 
-## 目录
+## 导航
 
-- [1. 架构（文字版）](#1-架构文字版)
-- [2. 已验证能力](#2-已验证能力)
-- [3. 快速开始](#3-快速开始)
-- [4. 配置（.env 字段）](#4-配置env-字段)
-- [5. 目录结构](#5-目录结构)
-- [6. 集成方式](#6-集成方式)
-- [7. Windows 桌面执行（Cua Driver）](#7-windows-桌面执行cua-driver)
-- [8. 安全说明](#8-安全说明)
-- [9. 常见故障排查](#9-常见故障排查)
-- [10. 路线图](#10-路线图)
-- [11. 致谢](#11-致谢)
-- [维护说明](MAINTENANCE.md)
+[快速开始](docs/QUICKSTART.zh.md) · [配置](docs/CONFIGURATION.zh.md) · [运维](docs/OPERATIONS.zh.md) · [租约与迁移](docs/LEASES.md)
 
 ---
 
@@ -67,61 +53,30 @@
    `Output/<taskId>_result.json`，可选经 `oc-send` 通知 Discord 频道。
 3. **Windows 桌面执行（v1.1+）**：DSH 调用 `oc-cua.mjs` → `ssh` 进入 Windows 宿主 →
    执行 `cua-driver call <tool> '<json>'` → 驱动操作真实桌面（截图、点击/键入/热键、
-   浏览器 CDP、拉起应用），**全程不偷焦点**。
+   浏览器 CDP、拉起应用），使用宿主桌面会话。
 
 ---
 
-## 2. 已验证能力
+## 2. 能力
 
-> 以下每一项都在真实环境中实际跑通并通过。
+- 网关连接使用显式 Origin 和持久化 Ed25519 身份；权限由网关审批控制。
+- 任务经必需的共用本地 SQLite 权威库原子领取，在异步执行期间续租，条件提交终态后生成 JSON 结果投影。
+- 支持回显、通知确认、受信命令、桥内文件读写和桥状态；桌面操作使用 SSH + Cua Driver。
+- 要求 Node >=22.13；首次初始化和升级先停止全部旧消费者，再按[租约指南](docs/LEASES.md)显式迁移。
+- 共享浏览器或桌面使用单一资源执行器或外部资源协调；任务租约约束任务所有权和结果提交。
 
-- ✅ **网关 WebSocket 握手 + Ed25519 设备配对**：HTTP Upgrade（显式 `Origin`）→
-  `connect.challenge`（nonce）→ 对 `v2` 认领串签名 → `connect` → `hello-ok`；
-  经控制台批准（operator 角色 + 5 scopes）。`deviceId = hex(SHA-256(Ed25519 公钥))` 恒定，
-  一次批准永久有效。**已知坑已修**：认领串与 `device.signedAt` 必须取自同一次 `Date.now()`
-  （见 docs/PROTOCOL.md §2.3）。
-- ✅ **网关方法调用**：`agents.list`、`status`、`health`、`talk.catalog`、
-  `talk.session.create`、`tools.invoke`（消息收发）、`config.schema.lookup` —— 全部通过。
-- ✅ **异步桥**：信封 → 守护进程 → 结果，`.tmp → rename` 原子写 + 幂等 `.state`；
-  kind 支持 `echo / notify / run-command / write-file / read-file / bridge-status`。
-- ✅ **Windows 桌面执行（v1.1，经 Cua Driver）**：从 DSH 容器经 SSH 实测：
-  - `cua-driver --version` → 0.21.0
-  - `get_screen_size` → 真实宿主分辨率（如 2560×1440）
-  - `get_accessibility_tree` → 经 UIA 读到真实桌面进程树
-  - 完整工具面：`get_desktop_state`、`browser_navigate/click/type/pointer`、`launch_app`、
-    `kill_app`、`click/double_click/right_click/hotkey/type/scroll`、`list_apps`、`list_windows` …
-
----
-
----
-
-## 3. 部署（几分钟搞定）
+## 3. 部署
 
 前置：**Docker** + 两张镜像——OpenClaw（官方 `openclaw/openclaw:latest`）与 DSH
 （无公开镜像；从 [DeepSeek Harness 仓库](https://github.com/deepseek-ai/deepseek-harness) 自建 `deepseek-harness:local`）。
 
-```bash
-# 1. 克隆，然后用交互式向导生成桥目录
-git clone https://github.com/Mikoribbit/ODSH-Bridge.git && cd ODSH-Bridge
-chmod +x scripts/new-bridge.sh
-./scripts/new-bridge.sh            # 可视化提示；回车保留默认
+先按[快速开始](docs/QUICKSTART.zh.md)配置镜像、生成桥目录、完成首次初始化并启动容器。通知通过 ODSH_NOTIFY=1 显式开启。
 
-# 2. 拉起 OpenClaw + DSH（DSH 内自动启动桥守护进程）
-docker compose up -d              # 使用生成的 docker-compose.yaml
 
-# 3. 配对一次，之后即开即用
-node src/oc-client.mjs connect    # 在 OpenClaw 控制台批准 deviceId
 
-# （可选）验证守护健康 + 一趟往返
-node src/dshtrigger.mjs status
-node src/dshtrigger.mjs send --kind echo --text "hello"
-```
+## 文档
 
-完整逐步、配置与可选 Windows 桌面（Cua）：**docs/QUICKSTART.md**。
-
-## 文档（已拆分）
-
-为了缩短本页，深挖内容移到了独立页面：
+按任务选择指南：
 
 | 页面 | 覆盖 |
 |------|------|
@@ -131,8 +86,9 @@ node src/dshtrigger.mjs send --kind echo --text "hello"
 | [**运维**](docs/OPERATIONS.zh.md) | Cua Windows 桌面、安全、故障排查 |
 | [**路线图**](ROADMAP.md) | 分阶段长期计划（ClawHub / 插件生态 / 事件总线）|
 | [**协议**](docs/PROTOCOL.md) | 网关握手 / JSON-RPC 细节 |
+| [**租约与恢复**](docs/LEASES.md) | 本地权威、迁移与恢复 |
 | [**桥规范**](docs/BRIDGE-SPEC.md) | 信封格式 / 状态机 / 分区 |
-| [**维护笔记**](MAINTENANCE.md) | 客观记录的问题与修复 |
+| [**维护笔记**](MAINTENANCE.md) | 维护与恢复 |
 
 ---
 
@@ -148,6 +104,8 @@ node src/dshtrigger.mjs send --kind echo --text "hello"
 
 ## 致谢
 
+- **odsh-interop**：OpenClaw 侧互操作技能，参见[安装说明](skills/odsh-interop/README.md)。
+
 - **Cua** — 本项目的 Windows 桌面执行层由
   [Cua Driver](https://github.com/trycua/cua)（trycua 团队）提供支持。感谢他们开源了一个跨平台、不抢焦点的
   computer-use 驱动，让 agent 可以在不抢走用户鼠标的情况下操作桌面应用。
@@ -155,4 +113,4 @@ node src/dshtrigger.mjs send --kind echo --text "hello"
 
 ---
 
-> 维护：ODSH Bridge contributors · 许可证：MIT · 核心 Node >= 18 · SQLite 审计存储需 Node >=22.5 · 零依赖 ESM
+> 维护：ODSH Bridge contributors · 许可证：MIT · Node >=22.13 · 零依赖 ESM

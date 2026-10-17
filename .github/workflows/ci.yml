@@ -12,16 +12,29 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ['22.13.0', '24']
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ matrix.node }}
 
       - name: Syntax check (npm run check)
         run: npm run check
+
+      - name: Isolated daemon startup (real SQLite authority)
+        shell: bash
+        run: |
+          bridge="$(mktemp -d)"
+          trap 'rm -rf "$bridge"' EXIT
+          mkdir -p "$bridge/Input" "$bridge/Output"
+          printf '%s' '{"taskId":"T-ci-start","target":"dsh","payload":{"kind":"echo","text":"startup"}}' > "$bridge/Input/T-ci-start.json"
+          BRIDGE_PATH="$bridge" BRIDGE_SQLITE=0 BRIDGE_LEASE_UPGRADE=all-consumers-stopped node src/bridge-daemon.mjs --once
+          node --input-type=module -e 'import fs from "node:fs"; const r=JSON.parse(fs.readFileSync(process.argv[1])); if(r.status!=="done"||r.payload.echoed!=="startup") process.exit(1)' "$bridge/Output/T-ci-start_result.json"
 
       - name: Security regression tests
         run: npm test

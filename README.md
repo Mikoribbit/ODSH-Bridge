@@ -6,7 +6,7 @@
 [**中文**](https://github.com/Mikoribbit/ODSH-Bridge/blob/main/README.zh.md)
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
-![Node](https://img.shields.io/badge/Node-%3E%3D18-green.svg)
+![Node](https://img.shields.io/badge/Node-%3E%3D22.13-green.svg)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)
 ![Platform](https://img.shields.io/badge/platform-Docker%2Fagent--mesh-blue.svg)
 
@@ -15,28 +15,14 @@
 > **One-line positioning**: lets DeepSeek Harness (DSH, the execution layer) reach the OpenClaw (brain/persona layer)
 > gateway over WebSocket, hand off tasks reliably between the two containers through a shared directory bridge
 > (envelope + daemon), and — since **v1.1** — operate a **real Windows desktop** on the host machine via
-> **SSH + [Cua Driver](https://github.com/trycua/cua)** (no OpenClaw Desktop, no dedicated node daemon).
+> **SSH + [Cua Driver](https://github.com/trycua/cua)** (SSH + Cua Driver execution path).
 
-> Everything here comes from a real integration that was run and verified in 2026-08 on the docker
-> `agent-mesh` network; anything not verified or speculative is marked `⚠️ verify yourself`.
-> All credentials are placeholders — no real token/secret should ever appear in this repository.
 
 ---
 
-## Table of contents
+## Navigation
 
-- [1. Architecture](#1-architecture-text-version)
-- [2. Verified features](#2-verified-features)
-- [3. Quick start](#3-quick-start)
-- [4. Configuration (.env fields)](#4-configuration-env-fields)
-- [5. Directory structure](#5-directory-structure)
-- [6. Integration approaches](#6-integration-approaches)
-- [7. Windows desktop execution (Cua Driver)](#7-windows-desktop-execution-cua-driver)
-- [8. Security notes](#8-security-notes)
-- [9. Troubleshooting (common failures)](#9-troubleshooting-common-failures)
-- [10. Roadmap](#10-roadmap)
-- [11. Credits](#11-credits)
-- [Maintenance notes](MAINTENANCE.md)
+[Quick Start](docs/QUICKSTART.md) · [Configuration](docs/CONFIGURATION.md) · [Operations](docs/OPERATIONS.md) · [Leases and migration](docs/LEASES.md)
 
 ---
 
@@ -68,60 +54,30 @@ There are three data flows:
    channel via `oc-send`.
 3. **Windows desktop execution (v1.1+)**: DSH calls `oc-cua.mjs` → `ssh` into the Windows host →
    invokes `cua-driver call <tool> '<json>'` → the driver operates the real desktop (snapshot,
-   click/type/hotkey, browser via CDP, app launch) **without stealing focus**.
+   click/type/hotkey, browser via CDP, app launch) **through the host desktop session**.
 
 ---
 
-## 2. Verified features
+## 2. Features
 
-> Each item below was actually exercised and passed in the real environment.
+- Gateway access with explicit Origin and a persistent Ed25519 identity; permissions are controlled by gateway approval.
+- Required shared local SQLite authority: atomic claims, renewal during asynchronous execution, conditional terminal commits and recoverable JSON result projections.
+- Echo, notification acknowledgement, trusted commands, bridge-confined file access and status; SSH + Cua Driver for desktop operations.
+- Node >=22.13. Stop all old consumers before first initialization or upgrade and follow [lease migration](docs/LEASES.md).
+- Shared browsers/desktops require one resource executor or external resource coordination; task leases govern task ownership and result commits.
 
-- ✅ **Gateway WebSocket handshake + Ed25519 device pairing**: HTTP Upgrade (with explicit `Origin`) →
-  `connect.challenge` (nonce) → sign the `v2` claim string → `connect` → `hello-ok`; the device is
-  approved through the Control UI (operator role + 5 scopes). `deviceId = hex(SHA-256(Ed25519 public
-  key))` stays constant, so a device approved once stays approved forever. **Known pitfall fixed**: the
-  claim and `device.signedAt` must come from the same `Date.now()` call (see docs/PROTOCOL.md §2.3).
-- ✅ **Gateway method calls**: `agents.list`, `status`, `health`, `talk.catalog`,
-  `talk.session.create`, `tools.invoke` (message send/read), `config.schema.lookup` — all pass.
-- ✅ **Async bridge**: envelope → daemon → result, with `.tmp → rename` atomic writes and an idempotent
-  `.state` store; kinds `echo / notify / run-command / write-file / read-file / bridge-status`.
-- ✅ **Windows desktop execution via Cua Driver (v1.1)**: verified from the DSH container over SSH:
-  - `cua-driver --version` → 0.21.0
-  - `get_screen_size` → real host resolution (e.g. 2560×1440)
-  - `get_accessibility_tree` → live desktop process tree via UIA
-  - full tool surface: `get_desktop_state`, `browser_navigate/click/type/pointer`, `launch_app`,
-    `kill_app`, `click/double_click/right_click/hotkey/type/scroll`, `list_apps`, `list_windows` …
-
-
----
-
-## 3. Deploy in minutes
+## 3. Deployment
 
 Requires: **Docker** + two images — OpenClaw (official `openclaw/openclaw:latest`) and DSH
 (no public image; build `deepseek-harness:local` from the [DeepSeek Harness repo](https://github.com/deepseek-ai/deepseek-harness)).
 
-```bash
-# 1. Clone, then scaffold the bridge with the interactive wizard
-git clone https://github.com/Mikoribbit/ODSH-Bridge.git && cd ODSH-Bridge
-chmod +x scripts/new-bridge.sh
-./scripts/new-bridge.sh            # visual prompts; press Enter to keep defaults
+Follow [Quick Start](docs/QUICKSTART.md) to configure images, scaffold the bridge, initialize the authority and start containers. Enable notifications explicitly with ODSH_NOTIFY=1.
 
-# 2. Bring up OpenClaw + DSH (bridge daemon auto-starts inside DSH)
-docker compose up -d              # uses the generated docker-compose.yaml
 
-# 3. Pair once, then it just works
-node src/oc-client.mjs connect    # approve the deviceId in the OpenClaw Control UI
 
-# (optional) verify daemon health + a round-trip
-node src/dshtrigger.mjs status
-node src/dshtrigger.mjs send --kind echo --text "hello"
-```
+## Documentation
 
-Full walkthrough, config, and optional Windows-desktop (Cua) setup: **docs/QUICKSTART.md**.
-
-## Documentation (split)
-
-To keep this page short, the deep-dive sections moved into their own pages:
+Choose a guide for your task:
 
 | Page | Covers |
 |------|--------|
@@ -131,8 +87,9 @@ To keep this page short, the deep-dive sections moved into their own pages:
 | [**Operations**](docs/OPERATIONS.md) | Cua Windows desktop, security notes, troubleshooting |
 | [**Roadmap**](ROADMAP.md) | phase-gated long-term plan (ClawHub, plugin ecosystem, event bus) |
 | [**Protocol**](docs/PROTOCOL.md) | gateway handshake / JSON-RPC details |
+| [**Leases**](docs/LEASES.md) | local authority, migration and recovery |
 | [**Bridge Spec**](docs/BRIDGE-SPEC.md) | envelope format, state machine, zones |
-| [**Maintenance**](MAINTENANCE.md) | objectively-observed issues & fixes |
+| [**Maintenance**](MAINTENANCE.md) | maintenance and recovery |
 
 ---
 
@@ -166,4 +123,4 @@ If this project helps you, consider supporting its maintainer:
 
 ---
 
-> Maintained by: ODSH Bridge contributors · License: MIT · Core Node >= 18 · SQLite audit store requires Node >=22.5 · Zero-dependency ESM
+> Maintained by: ODSH Bridge contributors · License: MIT · Node >=22.13 · Zero-dependency ESM

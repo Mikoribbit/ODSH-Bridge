@@ -25,7 +25,8 @@ done
 
 NOTIFY_FLAG=""
 # Enable completion notifications: set ODSH_NOTIFY=1 + DISCORD_CHANNEL_ID in compose env
-# if [ "${ODSH_NOTIFY:-}" = "1" ]; then NOTIFY_FLAG="--notify"; fi
+# Default remains disabled; only an explicit opt-in enables notifications.
+if [ "${ODSH_NOTIFY:-0}" = "1" ]; then NOTIFY_FLAG="--notify"; fi
 
 if [ -z "$DAEMON" ]; then
   echo "[entrypoint] WARN: no dshtrigger.mjs found (searched $REPO_SRC, $RUNTIME_TOOLS); daemon will NOT auto-start" >&2

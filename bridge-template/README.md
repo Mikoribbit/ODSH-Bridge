@@ -11,3 +11,5 @@ then reference it in docker-compose.yml via ODSH_BRIDGE_HOST_DIR, or in your own
 | Openclaw-Workspace/ | private OpenClaw memory/summaries | openclaw |
 
 Protocol docs: docs/BRIDGE-SPEC.md (in the repo).
+
+All task consumers require Node >=22.13 and the same physical local SQLite authority at Input/.state/leases.db. Initialize after stopping all old consumers; follow the [lease guide](../docs/LEASES.md) in the source checkout. Back up authority, marker and result projections together while offline. Generated runtime helpers live in DSH-Workspace/tools.

@@ -15,6 +15,7 @@ import net from 'node:net';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { envInt } from './env.mjs';
 
 const { webcrypto } = crypto;
 const subtle = webcrypto.subtle;
@@ -101,55 +102,85 @@ function wsPong(sock, payload) {
   wsSendFrame(sock, 0xA, payload);
 }
 
-async function ensureOpen(sock) {
-  for (let i = 0; i < 80 && sock.readyState !== 'open' && sock.readyState !== 'closed'; i++) {
-    await new Promise((r) => setTimeout(r, 50));
+async function ensureOpen(sock, deadline) {
+  while (sock.readyState !== 'open' && sock.readyState !== 'closed' && performance.now() < deadline) {
+    await new Promise((r) => setTimeout(r, Math.min(10, Math.max(0, deadline - performance.now()))));
   }
   return sock.readyState === 'open';
 }
 
-async function readN(sock, n, timeoutMs = 8000) {
-  const deadline = Date.now() + timeoutMs;
+async function readN(sock, n, timeoutMs = 8000, deadline = performance.now() + timeoutMs) {
   let buf = Buffer.alloc(0);
-  while (buf.length < n && Date.now() < deadline) {
+  while (buf.length < n && performance.now() < deadline) {
     try {
       const r = await sock.read(n - buf.length);
       if (r && r.length) buf = Buffer.concat([buf, Buffer.from(r)]);
     } catch { /* ignore transient read errors */ }
     if (sock.readyState === 'closed') break;
-    await new Promise((r) => setTimeout(r, 20));
+    if (buf.length < n) await new Promise((r) => setTimeout(r, Math.min(20, Math.max(0, deadline - performance.now()))));
   }
   return buf;
 }
 
-async function readHttpResp(sock) {
-  let buf = Buffer.alloc(0);
-  const deadline = Date.now() + 3000;
-  while (!buf.toString('utf8').includes('\r\n\r\n') && Date.now() < deadline) {
-    try {
-      const r = await sock.read(1);
-      if (r && r.length) buf = Buffer.concat([buf, Buffer.from(r)]);
-    } catch { /* ignore */ }
-    await new Promise((r) => setTimeout(r, 10));
-  }
-  return buf.toString('utf8');
+async function readHttpResp(sock, timeoutMs) {
+  const limit = 64 * 1024;
+  return new Promise((resolve, reject) => {
+    let buf = Buffer.alloc(0);
+    const cleanup = () => {
+      clearTimeout(timer);
+      sock.removeListener('readable', read);
+      sock.removeListener('end', ended);
+      sock.removeListener('close', ended);
+      sock.removeListener('error', failed);
+    };
+    const failed = (err) => { cleanup(); reject(err); };
+    const ended = () => failed(new Error('HTTP response header truncated'));
+    const read = () => {
+      try {
+        let chunk;
+        while ((chunk = sock.read(Math.min(sock.readableLength, limit + 1 - buf.length) || 1)) !== null) {
+          buf = Buffer.concat([buf, chunk]);
+          const end = buf.indexOf('\r\n\r\n');
+          if (end !== -1 && end + 4 <= limit) {
+            cleanup();
+            if (buf.length > end + 4) sock.unshift(buf.subarray(end + 4));
+            resolve(buf.subarray(0, end + 4).toString('utf8'));
+            return;
+          }
+          if (buf.length >= limit) { failed(new Error('HTTP response header exceeds size limit')); return; }
+        }
+        if (sock.readableEnded || sock.destroyed) ended();
+      } catch (err) { failed(err); }
+    };
+    const timer = setTimeout(() => failed(new Error('HTTP response header timed out (' + timeoutMs + 'ms)')), timeoutMs);
+    sock.on('readable', read);
+    sock.once('end', ended);
+    sock.once('close', ended);
+    sock.once('error', failed);
+    read();
+  });
 }
 
-async function readFrame(sock) {
-  const b = await readN(sock, 2);
+async function readFrame(sock, deadline) {
+  const read = async (n) => {
+    const data = await readN(sock, n, 8000, deadline);
+    if (deadline !== undefined && data.length !== n) throw new Error('connect frame truncated or timed out');
+    return data;
+  };
+  const b = await read(2);
   if (b.length < 2) return null;
   const b0 = b[0], b1 = b[1];
   const op = b0 & 0x0f;
   let len = b1 & 0x7f;
   if (len === 126) {
-    const e = await readN(sock, 2);
+    const e = await read(2);
     len = (e[0] << 8) | e[1];
   } else if (len === 127) {
-    const e = await readN(sock, 8);
+    const e = await read(8);
     len = Number([...e].reduce((a, x) => (a << 8n) | BigInt(x), 0n));
   }
-  if (b1 & 0x80) await readN(sock, 4);            // server frames should not be masked; skip defensively
-  const payload = op === 8 ? Buffer.alloc(0) : await readN(sock, len);
+  if (b1 & 0x80) await read(4);            // server frames should not be masked; skip defensively
+  const payload = op === 8 ? Buffer.alloc(0) : await read(len);
   return { op, len, payload };
 }
 
@@ -213,7 +244,8 @@ export class GatewayError extends Error {
  */
 export async function openSession(o = {}) {
   const host = o.host || process.env.OC_HOST || 'openclaw';
-  const port = Number(o.port ?? process.env.OC_PORT ?? '18789');
+  const port = Number(o.port ?? envInt('OC_PORT', 18789));
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('invalid gateway port');
   let token = o.token ?? process.env.OC_TOKEN ?? '';
   // SECURITY: never ship the .env.example placeholder to a real gateway.
   if (!token) { throw new Error('OC_TOKEN not set - put gateway.auth.token into .env (see .env.example)'); }
@@ -221,7 +253,8 @@ export async function openSession(o = {}) {
   const bridge = o.bridge || process.env.BRIDGE_PATH || '/root/ODSH-bridge';
   const keyFile = o.keyFile || process.env.OC_KEYS || path.join(bridge, 'DSH-Workspace', 'openclaw-device.json');
   const origin = o.origin || process.env.OC_ORIGIN || `http://${host}:${port}`;
-  const connectTimeoutMs = o.connectTimeoutMs || Number(process.env.OC_CONNECT_TIMEOUT_MS || '45000');
+  const connectTimeoutMs = Number(o.connectTimeoutMs ?? envInt('OC_CONNECT_TIMEOUT_MS', 45000));
+  if (!Number.isFinite(connectTimeoutMs) || connectTimeoutMs <= 0) throw new Error('invalid connect timeout');
   const log = o.onStatus || (() => {});
   if (!token) {
     throw new Error('OC_TOKEN not set. Set it in .env to the value of OpenClaw openclaw.json → gateway.auth.token (the release ships with no real token).');
@@ -233,16 +266,26 @@ export async function openSession(o = {}) {
   log('[i] target   = ' + host + ':' + port + ' (DNS container name)   origin = ' + origin);
 
   // 1) TCP → WS upgrade (with an explicit Origin header)
+  const deadline = performance.now() + connectTimeoutMs;
   const sock = await new Promise((resolve, reject) => {
     const s = net.connect({ host, port });
-    s.once('error', reject);
-    s.setTimeout(15000);
-    ensureOpen(s).then((ok) => {
-      if (!ok) { reject(new Error('socket did not open within the timeout: ' + host + ':' + port)); return; }
-      s.removeListener('error', reject);
+    const failed = (err) => { safeClose(s); reject(err); };
+    s.once('error', failed);
+    ensureOpen(s, deadline).then((ok) => {
+      if (!ok) { failed(new Error('socket did not open within the connect budget')); return; }
+      s.removeListener('error', failed);
       resolve(s);
     });
   });
+  const socketError = () => safeClose(sock);
+  sock.on('error', socketError);
+  const remaining = () => {
+    const ms = deadline - performance.now();
+    if (ms <= 0) throw new Error('connect timed out (' + connectTimeoutMs + 'ms)');
+    return ms;
+  };
+  let hello = null;
+  try {
 
   const key = crypto.randomBytes(16).toString('base64');
   const upgrade = [
@@ -257,7 +300,9 @@ export async function openSession(o = {}) {
     '', '',
   ].join('\r\n');
   sock.write(Buffer.from(upgrade));
-  const httpResp = await readHttpResp(sock);
+  let httpResp;
+  try { httpResp = await readHttpResp(sock, remaining()); }
+  catch (err) { safeClose(sock); throw err; }
   log('[<] handshake: ' + (httpResp.split('\r\n')[0] || '(no status line)'));
     const statusLine = httpResp.split('\r\n')[0] || '';
   // SECURITY: verify the exact status line AND the Sec-WebSocket-Accept header (derived from our
@@ -273,12 +318,10 @@ export async function openSession(o = {}) {
 
   // 2) challenge → signed connect
   const signKey = await subtle.importKey('jwk', identity.jwk, { name: 'Ed25519' }, false, ['sign']);
-  const deadline = Date.now() + connectTimeoutMs;
   let sentConnect = false;
-  let hello = null;
 
-  while (Date.now() < deadline) {
-    const f = await readFrame(sock);
+  while (performance.now() < deadline) {
+    const f = await readFrame(sock, deadline);
     if (!f) break;
     if (f.op === 8) {
       safeClose(sock);
@@ -314,10 +357,12 @@ export async function openSession(o = {}) {
         auth: { token },
         userAgent: 'DSH', locale: 'en',
       };
+      remaining();
       wsSendText(sock, JSON.stringify({ type: 'req', id: crypto.randomUUID(), method: CONNECT_METHOD, params }));
       sentConnect = true;
       log('[>] sent signed connect; deviceId=' + identity.deviceId);
     } else if (m.type === 'res' && m.ok && m.payload?.type === 'hello-ok') {
+      remaining();
       hello = m.payload;
       log('[CONNECTED] auth.hello protocol=' + hello.protocol);
       break;
@@ -338,6 +383,8 @@ export async function openSession(o = {}) {
     safeClose(sock);
     throw new Error('connect timed out (' + connectTimeoutMs + 'ms): the gateway did not return hello-ok');
   }
+
+  } catch (err) { safeClose(sock); throw err; }
 
   // 3) Ready: enter the request-response loop
   const pending = new Map();
@@ -380,7 +427,8 @@ export async function openSession(o = {}) {
     /** Request-response: send {type:'req', id, method, params}, wait for the matching {type:'res', id} */
     request(method, params = {}, { timeoutMs } = {}) {
       const id = crypto.randomUUID();
-      const wait = timeoutMs || Number(process.env.OC_REPLY_TIMEOUT_MS || '20000');
+      const wait = Number(timeoutMs ?? envInt('OC_REPLY_TIMEOUT_MS', 20000));
+      if (!Number.isFinite(wait) || wait <= 0) return Promise.reject(new Error('invalid request timeout'));
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           pending.delete(id);

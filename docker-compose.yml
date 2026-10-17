@@ -50,7 +50,13 @@ services:
     volumes:
       - "${ODSH_BRIDGE_HOST_DIR:-./bridge}:/root/ODSH-bridge"
       - ./src:/opt/odsh-bridge/src:ro
+      - ./scripts:/opt/odsh-bridge/scripts:ro
       - ./.env:/opt/odsh-bridge/.env:ro
+    env_file: .env
+    environment:
+      OC_ENV_FILE: /opt/odsh-bridge/.env
+      OC_SEND_SCRIPT: /opt/odsh-bridge/src/oc-send.mjs
+      OC_NODE_SCRIPT: /opt/odsh-bridge/src/oc-cua.mjs
     # Route A (self-start): boot the bridge daemon supervisor before DSH web.
     # The entrypoint lives in this repo (scripts/dsh-entrypoint.sh) and also falls
     # back to <bridge>/DSH-Workspace/tools/dshtrigger.mjs for separated deployments.
