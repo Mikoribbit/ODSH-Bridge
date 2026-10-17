@@ -2,9 +2,17 @@
 // Because we static-import node:sqlite, this module only loads on Node >=22.5.
 // sqlite-store.mjs wraps this in a try/catch so older runtimes degrade to no-op.
 import { DatabaseSync } from 'node:sqlite';
+import { mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+
+export function defaultAuditPath() {
+  return join(process.env.BRIDGE_PATH || '/root/ODSH-bridge', 'DSH-Workspace', 'dsh.db');
+}
 
 export function openStore(dbPath) {
-  const db = new DatabaseSync(dbPath || '');
+  dbPath = dbPath || process.env.BRIDGE_SQLITE_DB || defaultAuditPath();
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const db = new DatabaseSync(dbPath);
 
   db.exec(`CREATE TABLE IF NOT EXISTS dsh_envelopes (
     taskId TEXT PRIMARY KEY,

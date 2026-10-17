@@ -109,17 +109,25 @@ async function ensureOpen(sock, deadline) {
   return sock.readyState === 'open';
 }
 
-async function readN(sock, n, timeoutMs = 8000, deadline = performance.now() + timeoutMs) {
-  let buf = Buffer.alloc(0);
-  while (buf.length < n && performance.now() < deadline) {
-    try {
-      const r = await sock.read(n - buf.length);
-      if (r && r.length) buf = Buffer.concat([buf, Buffer.from(r)]);
-    } catch { /* ignore transient read errors */ }
-    if (sock.readyState === 'closed') break;
-    if (buf.length < n) await new Promise((r) => setTimeout(r, Math.min(20, Math.max(0, deadline - performance.now()))));
+// Idle reads may expire only before any frame byte has been consumed.
+async function readN(sock, n, timeoutMs = 8000, deadline = performance.now() + timeoutMs, idle = false) {
+  const chunks = [];
+  let size = 0;
+  while (size < n) {
+    if (performance.now() >= deadline) {
+      if (idle && size === 0 && !sock.readableLength) return null;
+      throw new Error('frame truncated or timed out');
+    }
+    const chunk = sock.read(Math.min(n - size, sock.readableLength || n - size));
+    if (chunk?.length) { chunks.push(chunk); size += chunk.length; continue; }
+    if (sock.destroyed || sock.readableEnded || sock.readyState === 'closed') throw new Error('connection closed during frame read');
+    if (performance.now() >= deadline) {
+      if (idle && size === 0) return null;
+      throw new Error('frame truncated or timed out');
+    }
+    await new Promise(r => setTimeout(r, Math.min(10, Math.max(0, deadline - performance.now()))));
   }
-  return buf;
+  return Buffer.concat(chunks, n);
 }
 
 async function readHttpResp(sock, timeoutMs) {
@@ -161,27 +169,57 @@ async function readHttpResp(sock, timeoutMs) {
   });
 }
 
+const MAX_FRAME_BYTES = 1024 * 1024;
+const MAX_MESSAGE_BYTES = 4 * MAX_FRAME_BYTES;
+
 async function readFrame(sock, deadline) {
-  const read = async (n) => {
-    const data = await readN(sock, n, 8000, deadline);
-    if (deadline !== undefined && data.length !== n) throw new Error('connect frame truncated or timed out');
-    return data;
-  };
-  const b = await read(2);
-  if (b.length < 2) return null;
-  const b0 = b[0], b1 = b[1];
-  const op = b0 & 0x0f;
-  let len = b1 & 0x7f;
-  if (len === 126) {
-    const e = await read(2);
-    len = (e[0] << 8) | e[1];
-  } else if (len === 127) {
-    const e = await read(8);
-    len = Number([...e].reduce((a, x) => (a << 8n) | BigInt(x), 0n));
+  const frameDeadline = deadline ?? performance.now() + 8000;
+  const b = await readN(sock, 2, 8000, frameDeadline, deadline === undefined);
+  if (!b) return null;
+  const fin = !!(b[0] & 0x80), op = b[0] & 15;
+  if ((b[0] & 0x70) || (b[1] & 0x80) || ![0, 1, 8, 9, 10].includes(op)) throw new Error('invalid WebSocket frame');
+  const read = n => readN(sock, n, 8000, frameDeadline);
+  let len = b[1] & 127;
+  if (op >= 8 && (!fin || len > 125)) throw new Error('invalid WebSocket control frame');
+  if (len === 126) { len = (await read(2)).readUInt16BE(); if (len < 126) throw new Error('invalid frame length'); }
+  else if (len === 127) {
+    const large = (await read(8)).readBigUInt64BE();
+    if (large < 65536n || large > BigInt(MAX_FRAME_BYTES)) throw new Error('frame exceeds size limit or invalid length');
+    len = Number(large);
   }
-  if (b1 & 0x80) await read(4);            // server frames should not be masked; skip defensively
-  const payload = op === 8 ? Buffer.alloc(0) : await read(len);
-  return { op, len, payload };
+  if (len > MAX_FRAME_BYTES) throw new Error('frame exceeds size limit');
+  if (op === 8 && len === 1) throw new Error('invalid close frame');
+  return { op, fin, payload: await read(len) };
+}
+
+// One reader spans authentication and ready state; control frames never reset fragments.
+function messageReader(sock) {
+  let chunks = [], size = 0, fragmented = false, messageDeadline;
+  return async function readMessage(deadline) {
+    while (true) {
+      const f = await readFrame(sock, deadline ?? messageDeadline);
+      if (!f) return null;
+      if (f.op === 8) throw new Error('connection closed by peer');
+      if (f.op === 9) { wsPong(sock, f.payload); continue; }
+      if (f.op === 10) continue;
+      if ((f.op === 0) !== fragmented) throw new Error('unexpected WebSocket continuation');
+      size += f.payload.length;
+      if (size > MAX_MESSAGE_BYTES) throw new Error('message exceeds size limit');
+      if (chunks.length >= 4096) throw new Error('message exceeds fragment limit');
+      chunks.push(f.payload);
+      if (!f.fin) { fragmented = true; messageDeadline ??= performance.now() + 8000; continue; }
+      const payload = Buffer.concat(chunks, size);
+      chunks = []; size = 0; fragmented = false; messageDeadline = undefined;
+      const m = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(payload));
+      if (!m || typeof m !== 'object' || Array.isArray(m) || !['res', 'event'].includes(m.type)) throw new Error('invalid gateway message');
+      if (m.type === 'res' && (typeof m.id !== 'string' || !m.id || typeof m.ok !== 'boolean' ||
+          (m.error !== undefined && (!m.error || typeof m.error !== 'object' || Array.isArray(m.error) ||
+            (m.error.code !== undefined && typeof m.error.code !== 'string') ||
+            (m.error.message !== undefined && typeof m.error.message !== 'string'))))) throw new Error('invalid gateway response');
+      if (m.type === 'event' && typeof m.event !== 'string') throw new Error('invalid gateway event');
+      return m;
+    }
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -193,23 +231,32 @@ async function readFrame(sock, deadline) {
  * @returns {Promise<{jwk: object, publicKeyStr: string, deviceId: string}>}
  */
 export async function loadIdentity(keyFile) {
-  if (fs.existsSync(keyFile)) {
+  const read = async () => {
     const j = JSON.parse(fs.readFileSync(keyFile, 'utf8'));
-    if (j.version === 1 && j.jwk?.kty === 'OKP' && j.jwk?.crv === 'Ed25519') {
-      const deviceId = await computeDeviceId(j.jwk);
-      return { jwk: j.jwk, publicKeyStr: j.jwk.x, deviceId };
-    }
-    throw new Error('bad identity file (expected {version:1, jwk:{kty:"OKP",crv:"Ed25519"}}): ' + keyFile);
-  }
-
-  // First run: generate an Ed25519 key pair and write it to the bridge's DSH-Workspace (the private key never leaves the DSH container)
+    if (j?.version !== 1 || j.jwk?.kty !== 'OKP' || j.jwk?.crv !== 'Ed25519' ||
+        typeof j.jwk.x !== 'string' || typeof j.jwk.d !== 'string') throw new Error('bad identity file: ' + keyFile);
+    const privateKey = crypto.createPrivateKey({ key: j.jwk, format: 'jwk' });
+    const publicJwk = crypto.createPublicKey(privateKey).export({ format: 'jwk' });
+    if (publicJwk.x !== j.jwk.x) throw new Error('identity public/private key mismatch');
+    const deviceId = await computeDeviceId(j.jwk);
+    return { jwk: j.jwk, publicKeyStr: j.jwk.x, deviceId };
+  };
+  try { return await read(); } catch (err) { if (err.code !== 'ENOENT') throw err; }
   const kp = await subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
-  const jwkFull = await subtle.exportKey('jwk', kp.privateKey);
-  const jwk = { kty: 'OKP', crv: 'Ed25519', x: jwkFull.x, d: jwkFull.d };
+  const full = await subtle.exportKey('jwk', kp.privateKey);
+  const jwk = { kty: 'OKP', crv: 'Ed25519', x: full.x, d: full.d };
   fs.mkdirSync(path.dirname(keyFile), { recursive: true });
-  fs.writeFileSync(keyFile, JSON.stringify({ version: 1, createdAtMs: Date.now(), jwk }, null, 2), { mode: 0o600 });
-  const deviceId = await computeDeviceId(jwk);
-  return { jwk, publicKeyStr: jwk.x, deviceId };
+  const temporary = keyFile + '.' + crypto.randomUUID() + '.tmp';
+  try {
+    const fd = fs.openSync(temporary, 'wx', 0o600);
+    try {
+      fs.writeFileSync(fd, JSON.stringify({ version: 1, createdAtMs: Date.now(), jwk }, null, 2));
+      fs.fsyncSync(fd);
+    } finally { fs.closeSync(fd); }
+    // A hard link atomically publishes complete bytes, without replacing an existing identity.
+    try { fs.linkSync(temporary, keyFile); } catch (err) { if (err.code !== 'EEXIST') throw err; }
+  } finally { fs.rmSync(temporary, { force: true }); }
+  return read();
 }
 
 // ---------------------------------------------------------------------------
@@ -285,6 +332,7 @@ export async function openSession(o = {}) {
     return ms;
   };
   let hello = null;
+  const readMessage = messageReader(sock);
   try {
 
   const key = crypto.randomBytes(16).toString('base64');
@@ -319,20 +367,14 @@ export async function openSession(o = {}) {
   // 2) challenge → signed connect
   const signKey = await subtle.importKey('jwk', identity.jwk, { name: 'Ed25519' }, false, ['sign']);
   let sentConnect = false;
+  const connectId = crypto.randomUUID();
 
   while (performance.now() < deadline) {
-    const f = await readFrame(sock, deadline);
-    if (!f) break;
-    if (f.op === 8) {
-      safeClose(sock);
-      throw new Error('received a close frame during the connect phase: ' + f.payload.toString('utf8'));
-    }
-    if (f.op === 9) { wsPong(sock, f.payload); continue; }
-    let m;
-    try { m = JSON.parse(f.payload.toString('utf8')); }
-    catch { log('[bad frame]', f.payload.toString('utf8').slice(0, 120)); continue; }
+    const m = await readMessage(deadline);
+    if (!m) continue;
 
     if (m.type === 'event' && m.event === 'connect.challenge') {
+      if (sentConnect || typeof m.payload?.nonce !== 'string' || !m.payload.nonce) throw new Error('invalid connect.challenge');
       const nonce = m.payload.nonce;
       const signedAt = Date.now(); // single timestamp: the claim signature and device.signedAt MUST share this same value, otherwise the gateway fails signature verification (device signature invalid)
       // 中文：claim 的 signedAt 必须与 device.signedAt 同值（只取一次 Date.now()），否则网关验签失败
@@ -358,15 +400,16 @@ export async function openSession(o = {}) {
         userAgent: 'DSH', locale: 'en',
       };
       remaining();
-      wsSendText(sock, JSON.stringify({ type: 'req', id: crypto.randomUUID(), method: CONNECT_METHOD, params }));
+      wsSendText(sock, JSON.stringify({ type: 'req', id: connectId, method: CONNECT_METHOD, params }));
       sentConnect = true;
       log('[>] sent signed connect; deviceId=' + identity.deviceId);
-    } else if (m.type === 'res' && m.ok && m.payload?.type === 'hello-ok') {
+    } else if (m.type === 'res' && m.id === connectId && m.ok && m.payload?.type === 'hello-ok') {
+      if (!sentConnect || m.payload.protocol !== 4) throw new Error('invalid hello-ok');
       remaining();
       hello = m.payload;
       log('[CONNECTED] auth.hello protocol=' + hello.protocol);
       break;
-    } else if (m.type === 'res' && !m.ok) {
+    } else if (m.type === 'res' && m.id === connectId && !m.ok) {
       const err = m.error || {};
       safeClose(sock);
       if (err.code === 'PAIRING_REQUIRED') {
@@ -391,17 +434,21 @@ export async function openSession(o = {}) {
   let closed = false;
   const onCloseCallbacks = [];
 
+  let keepaliveTimer = null;
+  const finish = (error = new Error('connection closed')) => {
+    if (closed) return;
+    closed = true;
+    if (keepaliveTimer) clearInterval(keepaliveTimer);
+    for (const p of pending.values()) { clearTimeout(p.timer); p.reject(error); }
+    pending.clear();
+    safeClose(sock);
+    for (const cb of onCloseCallbacks) { try { cb(); } catch { /* isolate subscribers */ } }
+  };
   (async function recvLoop() {
+    try {
     while (!closed) {
-      let f;
-      try { f = await readFrame(sock); } catch { break; }
-      if (!f) break;
-      if (f.op === 8) break;                 // close
-      if (f.op === 9) { wsPong(sock, f.payload); continue; }
-      if (f.op === 10) continue;
-      let m;
-      try { m = JSON.parse(f.payload.toString('utf8')); }
-      catch { continue; }
+      const m = await readMessage();
+      if (!m) continue;
       if (m.type === 'res' && m.id && pending.has(m.id)) {
         const p = pending.get(m.id);
         pending.delete(m.id);
@@ -412,11 +459,8 @@ export async function openSession(o = {}) {
       // Other frames (events/notifications) currently have no subscribers, so they are ignored. Event subscription could be extended here.
       // 中文：其余 event/notification 帧当前无订阅者，忽略；可在此扩展事件订阅。
     }
-    closed = true;
-    for (const p of pending.values()) { clearTimeout(p.timer); p.reject(new Error('connection closed')); }
-    pending.clear();
-    try { safeClose(sock); } catch { /* ignore */ }
-    for (const cb of onCloseCallbacks) { try { cb(); } catch { /* ignore */ } }
+    } catch (err) { finish(err); }
+    finally { finish(); }
   })();
 
   return {
@@ -426,6 +470,7 @@ export async function openSession(o = {}) {
 
     /** Request-response: send {type:'req', id, method, params}, wait for the matching {type:'res', id} */
     request(method, params = {}, { timeoutMs } = {}) {
+      if (closed) return Promise.reject(new Error('connection closed'));
       const id = crypto.randomUUID();
       const wait = Number(timeoutMs ?? envInt('OC_REPLY_TIMEOUT_MS', 20000));
       if (!Number.isFinite(wait) || wait <= 0) return Promise.reject(new Error('invalid request timeout'));
@@ -435,14 +480,17 @@ export async function openSession(o = {}) {
           reject(new Error('request timed out (' + wait + 'ms): ' + method));
         }, wait);
         pending.set(id, { resolve, reject, timer });
-        wsSendText(sock, JSON.stringify({ type: 'req', id, method, params }));
+        try { wsSendText(sock, JSON.stringify({ type: 'req', id, method, params })); }
+        catch (err) { finish(err); }
       });
     },
 
     /** One-way send (does not wait for a matching id) */
     send(method, params = {}) {
+      if (closed) throw new Error('connection closed');
       const id = crypto.randomUUID();
-      wsSendText(sock, JSON.stringify({ type: 'req', id, method, params }));
+      try { wsSendText(sock, JSON.stringify({ type: 'req', id, method, params })); }
+      catch (err) { finish(err); throw err; }
       return id;
     },
 
@@ -452,8 +500,8 @@ export async function openSession(o = {}) {
 
     close() {
       if (closed) return;
-      try { sock.write(Buffer.from([0x88, 0x00])); } catch { /* ignore */ }
-      try { safeClose(sock); } catch { /* ignore */ }
+      try { wsSendFrame(sock, 8, Buffer.alloc(0)); } catch { /* ignore */ }
+      finish();
     },
   };
 }

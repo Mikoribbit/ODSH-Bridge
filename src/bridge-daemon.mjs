@@ -59,6 +59,16 @@ function envelopeCandidates() {
 // Restricted executor for supported payload kinds (DSH local execution)
 // Resolve a file path safely: relative paths are confined under BRIDGE; absolute paths only when
 // ALLOW_ABS_PATHS=true (and even then must not traverse with '..'). Rejects anything escaping BRIDGE.
+function realTarget(path) {
+  let ancestor = resolve(path);
+  while (!lstatSync(ancestor, { throwIfNoEntry: false })) {
+    const parent = dirname(ancestor);
+    if (parent === ancestor) throw new Error('missing ancestor');
+    ancestor = parent;
+  }
+  return resolve(realpathSync(ancestor), relative(ancestor, resolve(path)));
+}
+
 function resolveTarget(file, mode) {
   const rawPath = String(file||'');
   if (!rawPath || rawPath.includes('\0')) return { error: 'invalid path' };
@@ -71,16 +81,18 @@ function resolveTarget(file, mode) {
     const inside = p => { const r = relative(bridgeRp, p); return r !== '..' && !r.startsWith('..' + sep) && !isAbsolute(r); };
     if (!inside(resolve(candidate))) return { error: 'path escapes bridge: ' + rawPath };
     // Resolve the file itself as well as ancestors: existing file symlinks must not escape.
-    let ancestor = resolve(candidate);
-    while (!lstatSync(ancestor, { throwIfNoEntry: false })) {
-      const parent = dirname(ancestor);
-      if (parent === ancestor) throw new Error('missing ancestor');
-      ancestor = parent;
+    const target = realTarget(candidate);
+    if (!inside(target)) return { error: 'path escapes bridge: ' + rawPath };
+    if (mode === 'write') {
+      const protectedPaths = [INPUT, OUTPUT, process.env.BRIDGE_LEASE_DB || join(STATE, 'leases.db')];
+      if (protectedPaths.some(p => {
+        const r = relative(realTarget(p), target);
+        return r === '' || (r !== '..' && !r.startsWith('..' + sep) && !isAbsolute(r));
+      })) return { error: 'bridge coordination paths are protected' };
     }
-    if (!inside(realpathSync(ancestor))) return { error: 'path escapes bridge: ' + rawPath };
-    if (mode === 'read' && !existsSync(candidate)) return { error: 'not found: ' + rawPath };
+    if (mode === 'read' && !existsSync(target)) return { error: 'not found: ' + rawPath };
+    return { path: target };
   } catch (e) { return { error: 'cannot resolve path: ' + rawPath }; }
-  return { path: candidate };
 }
 
 async function executePayload(task, signal) {
@@ -134,9 +146,6 @@ async function executePayload(task, signal) {
       if (!file) return { error: 'no file' };
       const dest = resolveTarget(file, 'write');
       if (dest.error) return { error: dest.error };
-      const normalized = resolve(dest.path).replaceAll('\\', '/').toLowerCase();
-      const protectedPaths = [INPUT, OUTPUT, process.env.BRIDGE_LEASE_DB || join(STATE, 'leases.db')];
-      if (protectedPaths.some(p => { const n = resolve(p).replaceAll('\\', '/').toLowerCase(); return normalized === n || normalized.startsWith(n + '/'); })) return { error: 'bridge coordination paths are protected' };
       mkdirSync(dirname(dest.path), { recursive: true });
       writeFileSync(dest.path, typeof content === 'string' ? content : JSON.stringify(content, null, 2));
       return { written: dest.path };
@@ -213,7 +222,7 @@ async function innerTick() {
       log('task conflict retained for review', f, e.message);
       continue;
     }
-    if (!lease) { authority.project(); continue; }
+    if (!lease) continue;
     let lost = false, renewalError;
     const controller = new AbortController();
     const renew = () => {
@@ -247,6 +256,8 @@ async function innerTick() {
     await notifyChannel(result.human);
     log('done', taskId, status);
   }
+  // Claims can create terminal review/deadline records without granting a lease.
+  authority.project();
 }
 try {
   authority = openLeaseStore({ bridge: BRIDGE, dbPath: process.env.BRIDGE_LEASE_DB });

@@ -1,7 +1,7 @@
 // sqlite-store.mjs — OPTIONAL SQLite auditing/stats side-store for the bridge daemon.
 //
-// Additive & non-required. The core bridge stays on the original JSON file store
-// (.state/dsh-processed.json + Output/*_result.json). When Node ships built-in
+// Additive & non-required. Task leases use a separate required authority DB;
+// JSON state/results are recoverable projections. When Node ships built-in
 // node:sqlite (>=22.5) AND BRIDGE_SQLITE is enabled, this module mirrors
 // task/event/error rows into <BRIDGE>/DSH-Workspace/dsh.db for queryable history,
 // aggregates and audit. If node:sqlite is unavailable or disabled, initSqlite()
@@ -20,9 +20,10 @@ export async function initSqlite(dbPath) {
   loading = (async () => {
     try {
       const imp = await import('./sqlite-impl.mjs');
-      store = imp.openStore(dbPath || process.env.BRIDGE_SQLITE_DB);
-    } catch (_) {
-      store = null; // node:sqlite unavailable / open failed -> auditing off, JSON store unaffected
+      store = imp.openStore(dbPath);
+    } catch (error) {
+      console.warn('[bridge audit] SQLite auditing disabled: ' + error.message);
+      store = null; // Optional audit failure must not disable task authority.
     }
     return store;
   })();

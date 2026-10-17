@@ -2,6 +2,11 @@
 
 ## Unreleased — authoritative task leases
 
+- Protect coordination paths through resolved symlink/junction targets while preserving ordinary bridge-local writes. Persist optional audit history to the bridge-local default database, create parent directories, and warn on audit initialization failure.
+- Bound historical idle scans to scan-level projections while retaining startup recovery and post-commit publication. Assign wizard input literally without shell evaluation, including spaces and dollar signs.
+
+- Reassemble bounded WebSocket text messages across control frames, validate authentication and ready messages, and close/reject pending requests on malformed or partial frames without treating idle reads as disconnects. Atomically publish complete device identities without overwriting existing files; concurrent callers reuse the winner.
+
 - Required local SQLite authority, atomic claim, random owner/token and generation, conditional renewal/completion, transactional terminal result; recoverable JSON projections.
 - Async execution, conservative needs-review on ambiguous effects, explicit retrySafe opt-in, legacy reconciliation and protected retention.
 - Stop all old consumers before migration; daemon requires Node >=22.13. Supported topology uses one host and one common local DB; shared browser resources require separate coordination. See docs/LEASES.md for deployment, migration and recovery.
